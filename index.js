@@ -1,0 +1,434 @@
+#!/usr/bin/env node
+// te1000-mcp: MCP server for the Beckhoff TwinCAT XAE / TE1000 Automation
+// Interface, via the PowerShell COM bridge (powershell/te1000-bridge.ps1).
+// v2: tool surface grouped by noun with action enums, terse schemas, compact
+// outputs — agent context is the scarce resource. The bridge is unchanged and
+// still answers the original fine-grained action names; this file maps the
+// merged tools onto them. plc_login/plc_logout were dropped from the surface
+// (DTE on the 64-bit shell exposes no window automation, so they never worked
+// here); reach them via xae_command if ever needed on another shell.
+"use strict";
+
+const { spawn } = require("child_process");
+const path = require("path");
+const os = require("os");
+const fs = require("fs");
+const { McpServer } = require("@modelcontextprotocol/sdk/server/mcp.js");
+const { StdioServerTransport } = require("@modelcontextprotocol/sdk/server/stdio.js");
+const z = require("zod/v4");
+
+const ACTIVATE_CONFIRMATION = "ALLOW_TWINCAT_ACTIVATE";
+const RESTART_CONFIRMATION = "ALLOW_TWINCAT_RESTART";
+const XAE_COMMAND_CONFIRMATION = "ALLOW_XAE_COMMAND_EXEC";
+
+// --- Modal-dialog watchdog -------------------------------------------------
+// A bridge COM call into XAE blocks until any modal dialog it raises is
+// dismissed by a human, hanging the MCP call forever. dialog-watch.ps1 runs
+// alongside each call: it detects the modal dialog, auto-clicks allowlisted
+// ones, and otherwise lets us fail the call with the dialog's details instead
+// of hanging. Toggle/tune via env:
+//   TE1000_DIALOG_WATCH=0        disable the watchdog entirely
+//   TE1000_DIALOG_AUTODISMISS=0  detect+report only, never auto-click
+//   TE1000_DIALOG_GRACE_MS=N     how long a blocking dialog must persist before
+//                                we abandon the call (default 4000)
+//   TE1000_BRIDGE_TIMEOUT_MS=N   optional wall-clock backstop (default 0 = off,
+//                                so long builds are never killed)
+const DIALOG_WATCH = process.env.TE1000_DIALOG_WATCH !== "0";
+const AUTO_DISMISS = process.env.TE1000_DIALOG_AUTODISMISS !== "0";
+const BLOCK_GRACE_MS = Number(process.env.TE1000_DIALOG_GRACE_MS) || 4000;
+const HARD_TIMEOUT_MS = Number(process.env.TE1000_BRIDGE_TIMEOUT_MS) || 0;
+let callSeq = 0;
+
+function killTree(child) {
+  if (!child || child.pid === undefined) return;
+  try { child.kill(); } catch {}
+  try { spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore" }); } catch {}
+}
+
+function bridgeCall(action, payload = {}) {
+  if (process.env.TE1000_PROGID && !payload.progId) payload.progId = process.env.TE1000_PROGID;
+  return new Promise((resolve, reject) => {
+    const scriptPath = path.join(__dirname, "powershell", "te1000-bridge.ps1");
+    const watchPath = path.join(__dirname, "powershell", "dialog-watch.ps1");
+    const allowlistPath = path.join(__dirname, "powershell", "dialog-allowlist.json");
+    const encodedPayload = Buffer.from(JSON.stringify(payload), "utf8").toString("base64");
+    // 64-bit TcXaeShell (DTE.17.0) needs 64-bit PowerShell; the legacy 32-bit shell (DTE.15.0) needs SysWOW64.
+    const winDir = process.env.WINDIR || "C:\\Windows";
+    const ps64 = path.join(winDir, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+    const psWow = path.join(winDir, "SysWOW64", "WindowsPowerShell", "v1.0", "powershell.exe");
+    const use64 = fs.existsSync("C:\\Program Files\\Beckhoff\\TcXaeShell\\Common7\\IDE\\PublicAssemblies\\envdte.dll");
+    const psExe = use64 ? ps64 : psWow;
+    const child = spawn(
+      psExe,
+      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath, "-Action", action, "-PayloadBase64", encodedPayload],
+      { stdio: ["ignore", "pipe", "pipe"] },
+    );
+
+    // --- dialog watchdog ---------------------------------------------------
+    let settled = false;
+    let watcher = null;
+    let pollTimer = null;
+    let hardTimer = null;
+    let blockingSince = null;
+    let lastDialog = null;
+    const outFile = path.join(os.tmpdir(), `te1000-dlg-${process.pid}-${Date.now()}-${callSeq++}.json`);
+    const stopFile = `${outFile}.stop`;
+
+    const cleanup = () => {
+      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+      if (hardTimer) { clearTimeout(hardTimer); hardTimer = null; }
+      try { fs.writeFileSync(stopFile, "1"); } catch {}
+      if (watcher) { try { watcher.kill(); } catch {} watcher = null; }
+      setTimeout(() => { for (const f of [outFile, stopFile]) { try { fs.unlinkSync(f); } catch {} } }, 2000);
+    };
+
+    if (DIALOG_WATCH) {
+      const wargs = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", watchPath, "-Mode", "guard",
+        "-OutFile", outFile, "-StopFile", stopFile, "-AllowlistPath", allowlistPath];
+      if (AUTO_DISMISS) wargs.push("-AutoDismiss");
+      try {
+        watcher = spawn(psExe, wargs, { stdio: "ignore" });
+        watcher.on("error", () => {});
+      } catch { watcher = null; }
+
+      pollTimer = setInterval(() => {
+        if (settled) return;
+        let snap;
+        try { snap = JSON.parse(fs.readFileSync(outFile, "utf8")); } catch { return; }
+        if (snap && snap.found && snap.blocking) {
+          lastDialog = snap;
+          if (blockingSince === null) blockingSince = Date.now();
+          else if (Date.now() - blockingSince >= BLOCK_GRACE_MS) {
+            settled = true;
+            const d = lastDialog || {};
+            const btns = Array.isArray(d.buttons) && d.buttons.length ? d.buttons.map((b) => `[${b}]`).join(" ") : "(none detected)";
+            killTree(child);
+            cleanup();
+            reject(new Error(
+              `XAE is blocked on a modal dialog, so this '${action}' call cannot complete.\n` +
+              `  Title:   ${d.title || "(untitled)"}\n` +
+              `  Message: ${d.text || "(no text)"}\n` +
+              `  Buttons: ${btns}\n` +
+              `The dialog is still open on the machine — clear it there, or add a rule to ` +
+              `powershell/dialog-allowlist.json to auto-dismiss this dialog next time. ` +
+              `The operation's result is indeterminate.`,
+            ));
+          }
+        } else {
+          blockingSince = null;
+        }
+      }, 1000);
+    }
+
+    if (HARD_TIMEOUT_MS > 0) {
+      hardTimer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        killTree(child);
+        cleanup();
+        reject(new Error(`Bridge call '${action}' exceeded TE1000_BRIDGE_TIMEOUT_MS (${HARD_TIMEOUT_MS} ms); no modal dialog was detected — XAE may be busy.`));
+      }, HARD_TIMEOUT_MS);
+    }
+
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+    child.on("error", (err) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(err);
+    });
+    child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (code !== 0) {
+        reject(new Error(`Bridge failed with exit code ${code}: ${stderr || stdout}`.trim()));
+        return;
+      }
+      try {
+        const parsed = JSON.parse(stdout);
+        if (!parsed.ok) {
+          reject(new Error(parsed.error || "Bridge returned failure"));
+          return;
+        }
+        resolve(parsed.data);
+      } catch (error) {
+        reject(new Error(`Failed to parse bridge output: ${error.message}\n${stdout}`));
+      }
+    });
+  });
+}
+
+function text(s) {
+  return { content: [{ type: "text", text: s }] };
+}
+
+// Drop null/empty values recursively so responses carry only signal.
+function prune(v) {
+  if (Array.isArray(v)) {
+    const a = v.map(prune).filter((x) => x !== undefined);
+    return a.length ? a : undefined;
+  }
+  if (v && typeof v === "object") {
+    const o = {};
+    for (const [k, x] of Object.entries(v)) {
+      const p = prune(x);
+      if (p !== undefined) o[k] = p;
+    }
+    return Object.keys(o).length ? o : undefined;
+  }
+  return v === null || v === "" ? undefined : v;
+}
+
+function textResult(data) {
+  if (data && typeof data === "object") {
+    if (typeof data.xml === "string") return text(data.xml); // raw XML beats JSON-escaped XML
+    if (Array.isArray(data.commands)) return text(`${data.count} commands\n${data.commands.join("\n")}`);
+    if (Array.isArray(data.items) && "available" in data) {
+      if (!data.available) return text("error list unavailable");
+      const lines = data.items.map((it) =>
+        `${it.errorLevel || "?"}  ${it.fileName || ""}(${it.line ?? ""}): ${it.description || ""}${it.project ? ` [${it.project}]` : ""}`);
+      return text([`${data.returned}/${data.count} items`, ...lines].join("\n"));
+    }
+  }
+  const p = prune(data);
+  return text(p === undefined ? "ok" : typeof p === "string" ? p : JSON.stringify(p));
+}
+
+function need(params, keys, action) {
+  for (const k of keys) {
+    if (params[k] === undefined || params[k] === "") throw new Error(`'${k}' is required for action=${action}`);
+  }
+}
+
+const server = new McpServer({ name: "te1000-mcp", version: "2.0.0" });
+
+const XAE_ACTIONS = {
+  status: "xae_status",
+  open_solution: "xae_open_solution",
+  save_all: "xae_save_all",
+  active_document: "xae_get_active_document",
+  selected_items: "xae_get_selected_items",
+  error_list: "xae_get_error_list",
+  clear_error_list: "xae_clear_error_list",
+  list_commands: "xae_list_commands",
+};
+
+server.registerTool(
+  "xae",
+  {
+    description: "XAE shell: status, open_solution (solutionPath), save_all, active_document, selected_items, error_list, clear_error_list, list_commands (filter regex, limit).",
+    inputSchema: {
+      action: z.enum(Object.keys(XAE_ACTIONS)),
+      solutionPath: z.string().optional(),
+      closeExisting: z.boolean().optional(),
+      filter: z.string().optional(),
+      limit: z.number().int().positive().max(5000).optional(),
+      mode: z.enum(["active", "activeOrCreate", "create"]).optional().describe("DTE attach mode; default active (open_solution: activeOrCreate)"),
+    },
+  },
+  async ({ action, solutionPath, closeExisting, filter, limit, mode }) => {
+    const payload = { mode };
+    if (action === "open_solution") {
+      need({ solutionPath }, ["solutionPath"], action);
+      Object.assign(payload, { solutionPath, visible: true, closeExisting: closeExisting || false, mode: mode || "activeOrCreate" });
+    }
+    if (action === "list_commands") Object.assign(payload, { filter, limit });
+    if (action === "error_list") payload.limit = limit;
+    return textResult(await bridgeCall(XAE_ACTIONS[action], payload));
+  },
+);
+
+server.registerTool(
+  "xae_build",
+  {
+    description: "Clean/Build/Rebuild the active solution configuration; waits for completion by default.",
+    inputSchema: {
+      action: z.enum(["clean", "build", "rebuild"]),
+      waitForFinish: z.boolean().default(true),
+      timeoutMs: z.number().int().positive().max(3600000).default(1800000),
+    },
+  },
+  async (params) => textResult(await bridgeCall("xae_solution_build", params)),
+);
+
+server.registerTool(
+  "xae_command",
+  {
+    description: `Execute a raw XAE/DTE command by name (e.g. View.SolutionExplorer). Guarded: confirm="${XAE_COMMAND_CONFIRMATION}".`,
+    inputSchema: {
+      confirm: z.string(),
+      commandName: z.string(),
+      args: z.string().optional(),
+    },
+  },
+  async ({ confirm, commandName, args }) => {
+    if (confirm !== XAE_COMMAND_CONFIRMATION) {
+      throw new Error(`Blocked. Re-run with confirm="${XAE_COMMAND_CONFIRMATION}" to execute an arbitrary XAE/DTE command.`);
+    }
+    return textResult(await bridgeCall("xae_execute_command", { commandName, args }));
+  },
+);
+
+server.registerTool(
+  "tc_tree",
+  {
+    description: "TwinCAT tree items (paths use ^ separators, e.g. TIPC^MyPlc, TIID^Device 1 (EtherCAT)). Actions: get, children, exists, get_xml (ProduceXml, returns raw XML), set_xml (ConsumeXml, modifies parameters), create (name+subType under path), delete (name under path), import (.xti file under path), export (name under path to file), focus (best-effort Solution Explorer focus).",
+    inputSchema: {
+      action: z.enum(["get", "children", "exists", "get_xml", "set_xml", "create", "delete", "import", "export", "focus"]),
+      path: z.string(),
+      xml: z.string().optional(),
+      name: z.string().optional(),
+      subType: z.number().int().optional(),
+      before: z.string().optional().describe("insert before this sibling"),
+      createInfo: z.string().optional(),
+      file: z.string().optional(),
+      reconnect: z.boolean().default(true),
+      newName: z.string().optional(),
+    },
+  },
+  async (p) => {
+    const t = { treePath: p.path };
+    switch (p.action) {
+      case "get": return textResult(await bridgeCall("twincat_lookup_tree_item", t));
+      case "children": return textResult(await bridgeCall("twincat_list_children", t));
+      case "exists": return textResult(await bridgeCall("twincat_test_item_path", t));
+      case "get_xml": return textResult(await bridgeCall("twincat_get_tree_item_xml", t));
+      case "set_xml":
+        need(p, ["xml"], p.action);
+        return textResult(await bridgeCall("twincat_set_tree_item_xml", { ...t, xml: p.xml }));
+      case "create":
+        need(p, ["name", "subType"], p.action);
+        return textResult(await bridgeCall("twincat_create_child", { parentPath: p.path, childName: p.name, subType: p.subType, beforeChildName: p.before, createInfo: p.createInfo }));
+      case "delete":
+        need(p, ["name"], p.action);
+        return textResult(await bridgeCall("twincat_delete_child", { parentPath: p.path, childName: p.name }));
+      case "import":
+        need(p, ["file"], p.action);
+        return textResult(await bridgeCall("twincat_import_child", { parentPath: p.path, filePath: p.file, beforeChildName: p.before, reconnect: p.reconnect, importAsName: p.newName }));
+      case "export":
+        need(p, ["name", "file"], p.action);
+        return textResult(await bridgeCall("twincat_export_child", { parentPath: p.path, childName: p.name, filePath: p.file }));
+      case "focus": return textResult(await bridgeCall("xae_focus_tree_item", t));
+    }
+  },
+);
+
+server.registerTool(
+  "tc_link",
+  {
+    description: "Variable links: link (a=source, b=destination), unlink (a, optional b; a alone removes all its links), resolve (report valid path forms for a). Dot-form PLC subfields auto-resolve to XAE ^ subitem form.",
+    inputSchema: {
+      action: z.enum(["link", "unlink", "resolve"]),
+      a: z.string(),
+      b: z.string().optional(),
+      autoResolve: z.boolean().default(true),
+    },
+  },
+  async ({ action, a, b, autoResolve }) => {
+    if (action === "link") {
+      need({ b }, ["b"], action);
+      return textResult(await bridgeCall("twincat_link_variables", { producer: a, consumer: b, autoResolve }));
+    }
+    if (action === "unlink") return textResult(await bridgeCall("twincat_unlink_variables", { variableA: a, variableB: b }));
+    return textResult(await bridgeCall("twincat_resolve_variable_path", { variablePath: a }));
+  },
+);
+
+server.registerTool(
+  "tc_system",
+  {
+    description: "System Manager: get_netid, set_netid (netId), errors (latest messages), rescan_plc (path, default TIPC), scan_io_boxes (path = IO device node).",
+    inputSchema: {
+      action: z.enum(["get_netid", "set_netid", "errors", "rescan_plc", "scan_io_boxes"]),
+      netId: z.string().optional(),
+      path: z.string().optional(),
+    },
+  },
+  async ({ action, netId, path: treePath }) => {
+    switch (action) {
+      case "get_netid": return textResult(await bridgeCall("twincat_get_target_netid", {}));
+      case "set_netid":
+        need({ netId }, ["netId"], action);
+        return textResult(await bridgeCall("twincat_set_target_netid", { targetNetId: netId }));
+      case "errors": return textResult(await bridgeCall("twincat_get_system_manager_errors", {}));
+      case "rescan_plc": return textResult(await bridgeCall("twincat_rescan_plc_project", { treePath: treePath || "TIPC" }));
+      case "scan_io_boxes":
+        need({ path: treePath }, ["path"], action);
+        return textResult(await bridgeCall("twincat_scan_io_boxes", { treePath }));
+    }
+  },
+);
+
+server.registerTool(
+  "nc",
+  {
+    description: "NC motion tree: tasks (list under TINC), axes (path = task, default first task), axis (path = full axis path, returns info + children).",
+    inputSchema: {
+      action: z.enum(["tasks", "axes", "axis"]),
+      path: z.string().optional(),
+    },
+  },
+  async ({ action, path: p }) => {
+    if (action === "tasks") return textResult(await bridgeCall("nc_list_tasks", {}));
+    if (action === "axes") return textResult(await bridgeCall("nc_list_axes", { taskPath: p }));
+    need({ path: p }, ["path"], action);
+    return textResult(await bridgeCall("nc_get_axis_info", { axisPath: p }));
+  },
+);
+
+server.registerTool(
+  "plc_download",
+  {
+    description: 'Deploy the active PLC project. method "bootproject" (default): headless via ITcPlcProject — writes the boot project to the target boot dir; twincat_restart_runtime loads and runs it. method "command": legacy DTE command route (needs a shell with window automation).',
+    inputSchema: {
+      method: z.enum(["bootproject", "command"]).default("bootproject"),
+      treePath: z.string().optional().describe("PLC root node, default first project under TIPC"),
+      autostart: z.boolean().default(true),
+      commandName: z.string().optional(),
+    },
+  },
+  async (params) => textResult(await bridgeCall("plc_download", params)),
+);
+
+server.registerTool(
+  "twincat_activate_configuration",
+  {
+    description: `Activate the TwinCAT configuration on the target. Guarded: confirm="${ACTIVATE_CONFIRMATION}".`,
+    inputSchema: { confirm: z.string() },
+  },
+  async ({ confirm }) => {
+    if (confirm !== ACTIVATE_CONFIRMATION) {
+      throw new Error(`Blocked. Re-run with confirm="${ACTIVATE_CONFIRMATION}" to activate the current TwinCAT configuration.`);
+    }
+    return textResult(await bridgeCall("twincat_activate_configuration", { confirm }));
+  },
+);
+
+server.registerTool(
+  "twincat_restart_runtime",
+  {
+    description: `Start/restart the TwinCAT runtime on the target. Guarded: confirm="${RESTART_CONFIRMATION}".`,
+    inputSchema: { confirm: z.string() },
+  },
+  async ({ confirm }) => {
+    if (confirm !== RESTART_CONFIRMATION) {
+      throw new Error(`Blocked. Re-run with confirm="${RESTART_CONFIRMATION}" to restart TwinCAT.`);
+    }
+    return textResult(await bridgeCall("twincat_restart_runtime", { confirm }));
+  },
+);
+
+async function main() {
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  console.error("te1000-mcp server running on stdio");
+}
+
+main().catch((error) => {
+  console.error("Server error:", error);
+  process.exit(1);
+});

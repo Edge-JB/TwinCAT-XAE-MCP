@@ -1,0 +1,38 @@
+{
+  "name": "te1000-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for Beckhoff TwinCAT TE1000 / XAE Shell automation",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "check": "node --check index.js"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "twincat",
+    "beckhoff",
+    "te1000",
+    "xae",
+    "plc",
+    "automation-interface"
+  ],
+  "author": "Edge Automation",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Edge-JB/tc1000-MCP-TC-4026.git"
+  },
+  "homepage": "https://github.com/Edge-JB/tc1000-MCP-TC-4026#readme",
+  "bugs": {
+    "url": "https://github.com/Edge-JB/tc1000-MCP-TC-4026/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "type": "commonjs",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.3.6"
+  }
+}

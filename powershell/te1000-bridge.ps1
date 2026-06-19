@@ -1,0 +1,2206 @@
+param(
+    [Parameter(Mandatory = $true)]
+    [string]$Action,
+
+    [Parameter(Mandatory = $false)]
+    [string]$PayloadBase64 = ''
+)
+
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+
+function Write-JsonResult([hashtable]$Result) {
+    $json = $Result | ConvertTo-Json -Depth 20 -Compress
+    [Console]::Out.WriteLine($json)
+}
+
+function Fail([string]$Message) {
+    Write-JsonResult @{
+        ok = $false
+        error = $Message
+    }
+    exit 1
+}
+
+function Get-Payload {
+    if ([string]::IsNullOrWhiteSpace($PayloadBase64)) {
+        return @{}
+    }
+
+    $json = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($PayloadBase64))
+    if ([string]::IsNullOrWhiteSpace($json)) {
+        return @{}
+    }
+
+    $obj = $json | ConvertFrom-Json
+    if ($null -eq $obj) {
+        return @{}
+    }
+
+    return $obj
+}
+
+function Get-ErrorCode([System.Exception]$Exception) {
+    if ($null -eq $Exception) {
+        return ''
+    }
+    return ('0x{0:X8}' -f ($Exception.HResult -band 0xffffffff))
+}
+
+function Get-SafeValue {
+    param(
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$ScriptBlock
+    )
+
+    try {
+        Write-Output -NoEnumerate (& $ScriptBlock)
+        return
+    } catch {
+        return $null
+    }
+}
+
+function Get-XaePublicAssembliesPath {
+    $candidates = @(
+        'C:\Program Files (x86)\Beckhoff\TcXaeShell\Common7\IDE\PublicAssemblies',
+        'C:\Program Files\Beckhoff\TcXaeShell\Common7\IDE\PublicAssemblies'
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath (Join-Path $candidate 'envdte.dll')) {
+            return $candidate
+        }
+    }
+    return $candidates[0]
+}
+
+function Ensure-VisualStudioInteropLoaded {
+    $publicAssemblies = Get-XaePublicAssembliesPath
+    $envDtePath = Join-Path $publicAssemblies 'envdte.dll'
+    $envDte80Path = Join-Path $publicAssemblies 'envdte80.dll'
+
+    if (-not (Test-Path -LiteralPath $envDtePath)) {
+        throw "EnvDTE interop assembly not found: $envDtePath"
+    }
+    if (-not (Test-Path -LiteralPath $envDte80Path)) {
+        throw "EnvDTE80 interop assembly not found: $envDte80Path"
+    }
+
+    $null = [System.Reflection.Assembly]::LoadFrom($envDtePath)
+    $null = [System.Reflection.Assembly]::LoadFrom($envDte80Path)
+
+    # VS2022-era shells (TcXaeShell 64) forward DTE/DTE2 types to Microsoft.VisualStudio.Interop.
+    $vsInteropPath = Join-Path $publicAssemblies 'Microsoft.VisualStudio.Interop.dll'
+    if (Test-Path -LiteralPath $vsInteropPath) {
+        $null = [System.Reflection.Assembly]::LoadFrom($vsInteropPath)
+    } else {
+        $vsInteropPath = $null
+    }
+
+    return @{
+        envDte = $envDtePath
+        envDte80 = $envDte80Path
+        vsInterop = $vsInteropPath
+    }
+}
+
+function Get-InteropReferenceList {
+    param([hashtable]$Assemblies)
+    $refs = @($Assemblies.envDte, $Assemblies.envDte80)
+    if ($Assemblies.vsInterop) {
+        $refs += $Assemblies.vsInterop
+    }
+    return $refs
+}
+
+function Ensure-ComMessageFilter {
+    # XAE/VS DTE rejects incoming COM calls while busy (RPC_E_CALL_REJECTED 0x80010001).
+    # Beckhoff TE1000 docs require an IOleMessageFilter that retries rejected calls.
+    if (-not ('Te1000MessageFilter' -as [type])) {
+        $code = @"
+using System;
+using System.Runtime.InteropServices;
+
+[ComImport, Guid("00000016-0000-0000-C000-000000000046"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IOleMessageFilter
+{
+    [PreserveSig] int HandleInComingCall(int dwCallType, IntPtr hTaskCaller, int dwTickCount, IntPtr lpInterfaceInfo);
+    [PreserveSig] int RetryRejectedCall(IntPtr hTaskCallee, int dwTickCount, int dwRejectType);
+    [PreserveSig] int MessagePending(IntPtr hTaskCallee, int dwTickCount, int dwPendingType);
+}
+
+public class Te1000MessageFilter : IOleMessageFilter
+{
+    [DllImport("Ole32.dll")]
+    private static extern int CoRegisterMessageFilter(IOleMessageFilter newFilter, out IOleMessageFilter oldFilter);
+
+    public static void Register()
+    {
+        IOleMessageFilter oldFilter;
+        CoRegisterMessageFilter(new Te1000MessageFilter(), out oldFilter);
+    }
+
+    public static void Revoke()
+    {
+        IOleMessageFilter oldFilter;
+        CoRegisterMessageFilter(null, out oldFilter);
+    }
+
+    int IOleMessageFilter.HandleInComingCall(int dwCallType, IntPtr hTaskCaller, int dwTickCount, IntPtr lpInterfaceInfo)
+    {
+        return 0; // SERVERCALL_ISHANDLED
+    }
+
+    int IOleMessageFilter.RetryRejectedCall(IntPtr hTaskCallee, int dwTickCount, int dwRejectType)
+    {
+        // SERVERCALL_RETRYLATER: retry every 150 ms for up to 60 s, then give up.
+        if (dwRejectType == 2 && dwTickCount < 60000)
+        {
+            return 150;
+        }
+        return -1; // cancel
+    }
+
+    int IOleMessageFilter.MessagePending(IntPtr hTaskCallee, int dwTickCount, int dwPendingType)
+    {
+        return 2; // PENDINGMSG_WAITDEFPROCESS
+    }
+}
+"@
+        Add-Type -TypeDefinition $code
+    }
+
+    [Te1000MessageFilter]::Register()
+}
+
+function Ensure-XaeErrorListProbeType {
+    if ('XaeErrorListProbe' -as [type]) {
+        return
+    }
+
+    $assemblies = Ensure-VisualStudioInteropLoaded
+    $code = @"
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Threading;
+using EnvDTE80;
+
+public sealed class XaeErrorListItem
+{
+    public string Description { get; set; }
+    public string FileName { get; set; }
+    public int Line { get; set; }
+    public int Column { get; set; }
+    public string Project { get; set; }
+    public string ErrorLevel { get; set; }
+}
+
+public sealed class XaeErrorListResult
+{
+    public int TotalCount { get; set; }
+    public XaeErrorListItem[] Items { get; set; }
+}
+
+public static class XaeErrorListProbe
+{
+    public static XaeErrorListResult Read(string progId, int limit)
+    {
+        object raw = Marshal.GetActiveObject(progId);
+        IntPtr pUnk = Marshal.GetIUnknownForObject(raw);
+        try
+        {
+            DTE2 dte = (DTE2)Marshal.GetTypedObjectForIUnknown(pUnk, typeof(DTE2));
+            dte.ExecuteCommand("View.ErrorList", " ");
+            Thread.Sleep(1000);
+
+            var errorList = dte.ToolWindows.ErrorList;
+            if (errorList == null)
+            {
+                return null;
+            }
+
+            errorList.ShowErrors = true;
+            errorList.ShowWarnings = true;
+            errorList.ShowMessages = true;
+
+            var errorItems = errorList.ErrorItems;
+            int totalCount = errorItems.Count;
+            int returnedCount = Math.Min(totalCount, limit);
+            var results = new List<XaeErrorListItem>(returnedCount);
+
+            for (int i = 1; i <= returnedCount; i++)
+            {
+                var item = errorItems.Item(i);
+                results.Add(new XaeErrorListItem
+                {
+                    Description = item.Description,
+                    FileName = item.FileName,
+                    Line = item.Line,
+                    Column = item.Column,
+                    Project = item.Project,
+                    ErrorLevel = item.ErrorLevel.ToString()
+                });
+            }
+
+            return new XaeErrorListResult
+            {
+                TotalCount = totalCount,
+                Items = results.ToArray()
+            };
+        }
+        finally
+        {
+            if (pUnk != IntPtr.Zero)
+            {
+                Marshal.Release(pUnk);
+            }
+        }
+    }
+}
+"@
+
+    Add-Type -TypeDefinition $code -ReferencedAssemblies (Get-InteropReferenceList -Assemblies $assemblies)
+}
+
+function Ensure-DteRotProbeType {
+    if ('DteRotProbe' -as [type]) {
+        return
+    }
+
+    $assemblies = Ensure-VisualStudioInteropLoaded
+    $code = @"
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.ComTypes;
+using EnvDTE80;
+
+public sealed class DteRotEntry
+{
+    public string DisplayName { get; set; }
+    public string SolutionFullName { get; set; }
+    public object Dte { get; set; }
+}
+
+public static class DteRotProbe
+{
+    [DllImport("ole32.dll")]
+    private static extern int GetRunningObjectTable(int reserved, out IRunningObjectTable prot);
+
+    [DllImport("ole32.dll")]
+    private static extern int CreateBindCtx(int reserved, out IBindCtx ppbc);
+
+    public static DteRotEntry[] List(string progId)
+    {
+        IRunningObjectTable rot;
+        if (GetRunningObjectTable(0, out rot) != 0 || rot == null)
+        {
+            return new DteRotEntry[0];
+        }
+
+        IBindCtx bindCtx;
+        if (CreateBindCtx(0, out bindCtx) != 0 || bindCtx == null)
+        {
+            return new DteRotEntry[0];
+        }
+
+        IEnumMoniker enumMoniker;
+        rot.EnumRunning(out enumMoniker);
+        if (enumMoniker == null)
+        {
+            return new DteRotEntry[0];
+        }
+
+        var result = new List<DteRotEntry>();
+        IMoniker[] monikers = new IMoniker[1];
+        IntPtr fetched = IntPtr.Zero;
+
+        while (enumMoniker.Next(1, monikers, fetched) == 0)
+        {
+            string displayName = "";
+            try
+            {
+                monikers[0].GetDisplayName(bindCtx, null, out displayName);
+            }
+            catch
+            {
+                displayName = "";
+            }
+
+            if (String.IsNullOrWhiteSpace(displayName) ||
+                displayName.IndexOf(progId, StringComparison.OrdinalIgnoreCase) < 0)
+            {
+                continue;
+            }
+
+            object raw = null;
+            try
+            {
+                rot.GetObject(monikers[0], out raw);
+                DTE2 dte = raw as DTE2;
+                if (dte == null)
+                {
+                    continue;
+                }
+
+                string solution = "";
+                try
+                {
+                    solution = dte.Solution != null ? dte.Solution.FullName : "";
+                }
+                catch
+                {
+                    solution = "";
+                }
+
+                result.Add(new DteRotEntry
+                {
+                    DisplayName = displayName,
+                    SolutionFullName = solution,
+                    Dte = dte
+                });
+            }
+            catch
+            {
+            }
+        }
+
+        return result.ToArray();
+    }
+}
+"@
+
+    Add-Type -TypeDefinition $code -ReferencedAssemblies (Get-InteropReferenceList -Assemblies $assemblies)
+}
+
+function Get-RunningDteEntries {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ProgId
+    )
+
+    Ensure-DteRotProbeType
+    return [DteRotProbe]::List($ProgId)
+}
+
+function Get-PreferredDteFromRot {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ProgId
+    )
+
+    $entries = @(Get-RunningDteEntries -ProgId $ProgId)
+    if ($entries.Count -eq 0) {
+        return $null
+    }
+
+    # Optional: set TE1000_MCP_SOLUTION_PATH to prefer a specific running
+    # solution when several XAE shells are open. If unset, the first open
+    # solution found is used.
+    $preferredSolution = $env:TE1000_MCP_SOLUTION_PATH
+
+    if (-not [string]::IsNullOrWhiteSpace($preferredSolution)) {
+        foreach ($entry in $entries) {
+            if (-not [string]::IsNullOrWhiteSpace($entry.SolutionFullName) -and
+                [string]::Equals($entry.SolutionFullName, $preferredSolution, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $entry.Dte
+            }
+        }
+    }
+
+    foreach ($entry in $entries) {
+        if (-not [string]::IsNullOrWhiteSpace($entry.SolutionFullName)) {
+            return $entry.Dte
+        }
+    }
+
+    return $entries[0].Dte
+}
+
+function Get-XaeErrorListItems {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ProgId,
+
+        [Parameter(Mandatory = $true)]
+        [int]$Limit
+    )
+
+    Ensure-XaeErrorListProbeType
+    return [XaeErrorListProbe]::Read($ProgId, $Limit)
+}
+
+function Normalize-ScalarValue {
+    param(
+        [Parameter(Mandatory = $false)]
+        $Value
+    )
+
+    if ($null -eq $Value) {
+        return $null
+    }
+
+    if ($Value -is [System.Array]) {
+        if ($Value.Count -gt 0) {
+            Write-Output -NoEnumerate $Value[0]
+            return
+        }
+        return $null
+    }
+
+    Write-Output -NoEnumerate $Value
+    return
+}
+
+function Get-TreeItemChildCount {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$TreeItem
+    )
+
+    $value = Normalize-ScalarValue (Get-SafeValue { $TreeItem.ChildCount })
+    if ($null -eq $value) {
+        return 0
+    }
+    return [int]$value
+}
+
+function Get-TreeItemChild {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$TreeItem,
+
+        [Parameter(Mandatory = $true)]
+        [int]$Index
+    )
+
+    try {
+        $item = $TreeItem.Child($Index)
+    } catch {
+        $item = $null
+    }
+    Write-Output -NoEnumerate ([ref]$item)
+    return
+}
+
+function Is-RetryableComError([System.Exception]$Exception) {
+    if ($null -eq $Exception) {
+        return $false
+    }
+
+    $code = $Exception.HResult
+    return $code -eq -2147418111 -or $code -eq -2147023174
+}
+
+function Invoke-WithRetry {
+    param(
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$ScriptBlock,
+
+        [int]$Attempts = 30,
+
+        [int]$DelayMs = 500
+    )
+
+    for ($i = 1; $i -le $Attempts; $i++) {
+        try {
+            Write-Output -NoEnumerate (& $ScriptBlock)
+            return
+        } catch {
+            if ((Is-RetryableComError $_.Exception) -and $i -lt $Attempts) {
+                Start-Sleep -Milliseconds $DelayMs
+                continue
+            }
+            throw
+        }
+    }
+}
+
+function Get-Dte {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ProgId,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Mode,
+
+        [bool]$Visible = $true
+    )
+
+    switch ($Mode) {
+        'active' {
+            $dte = Get-PreferredDteFromRot -ProgId $ProgId
+            if ($null -ne $dte) {
+                return $dte
+            }
+            return [System.Runtime.InteropServices.Marshal]::GetActiveObject($ProgId)
+        }
+        'create' {
+            $dte = New-Object -ComObject $ProgId
+            try {
+                $dte.SuppressUI = $true
+            } catch {
+            }
+            try {
+                $dte.MainWindow.Visible = $Visible
+            } catch {
+            }
+            return $dte
+        }
+        'activeOrCreate' {
+            try {
+                $dte = Get-PreferredDteFromRot -ProgId $ProgId
+                if ($null -ne $dte) {
+                    return $dte
+                }
+                return [System.Runtime.InteropServices.Marshal]::GetActiveObject($ProgId)
+            } catch {
+                return Get-Dte -ProgId $ProgId -Mode 'create' -Visible $Visible
+            }
+        }
+        default {
+            throw "Unsupported DTE mode: $Mode"
+        }
+    }
+}
+
+function Get-SolutionInfo($Dte) {
+    $solution = $Dte.Solution
+    $fullName = $null
+    $isOpen = $false
+
+    try {
+        $fullName = $solution.FullName
+    } catch {
+    }
+
+    try {
+        $isOpen = $solution.IsOpen
+    } catch {
+        $isOpen = -not [string]::IsNullOrWhiteSpace($fullName)
+    }
+
+    return @{
+        isOpen = [bool]$isOpen
+        fullName = $fullName
+    }
+}
+
+function Wait-ForSolutionOpen($Dte, [string]$ExpectedPath) {
+    return Invoke-WithRetry -Attempts 60 -DelayMs 500 -ScriptBlock {
+        $info = Get-SolutionInfo -Dte $Dte
+        if (-not $info.isOpen) {
+            throw "Solution is not open yet"
+        }
+        if (-not [string]::IsNullOrWhiteSpace($ExpectedPath) -and $info.fullName -ne $ExpectedPath) {
+            throw "Different solution is active: $($info.fullName)"
+        }
+        return $info
+    }
+}
+
+function Get-SysManager($Dte) {
+    for ($attempt = 1; $attempt -le 40; $attempt++) {
+        try {
+            $solution = $Dte.Solution
+            if ($null -ne $solution -and $null -ne $solution.Projects) {
+                for ($i = 1; $i -le $solution.Projects.Count; $i++) {
+                    $project = $solution.Projects.Item($i)
+                    if ($null -eq $project) {
+                        continue
+                    }
+
+                    $fullName = $null
+                    try {
+                        $fullName = [string]$project.FullName
+                    } catch {
+                    }
+                    if ([string]::IsNullOrWhiteSpace($fullName) -or -not $fullName.EndsWith('.tsproj', [System.StringComparison]::OrdinalIgnoreCase)) {
+                        continue
+                    }
+
+                    $projectObject = $null
+                    try {
+                        $projectObject = $project.Object
+                    } catch {
+                    }
+                    if ($null -eq $projectObject) {
+                        continue
+                    }
+
+                    # In some XAE sessions DTE.GetObject('TcSysManager') returns a stale
+                    # COM wrapper. The TwinCAT project object is the same automation
+                    # surface, but remains bound to the loaded .tsproj.
+                    $probe = Get-SafeValue { $projectObject.GetTargetNetId() }
+                    if ($null -ne $probe) {
+                        Write-Output -NoEnumerate ([ref]$projectObject)
+                        return
+                    }
+                }
+            }
+        $sm = $Dte.GetObject('TcSysManager')
+        if ($null -eq $sm) {
+            throw 'TcSysManager is null'
+        }
+        Write-Output -NoEnumerate ([ref]$sm)
+        return
+        } catch {
+            if ((Is-RetryableComError $_.Exception) -and $attempt -lt 40) {
+                Start-Sleep -Milliseconds 500
+                continue
+            }
+            throw
+        }
+    }
+}
+
+function Wait-ForBuildFinish($SolutionBuild, [int]$TimeoutMs) {
+    $deadline = (Get-Date).AddMilliseconds($TimeoutMs)
+
+    while ((Get-Date) -lt $deadline) {
+        $state = $SolutionBuild.BuildState
+        if ([int]$state -ne 2) {
+            return @{
+                buildState = [int]$state
+                lastBuildInfo = [int]$SolutionBuild.LastBuildInfo
+            }
+        }
+        Start-Sleep -Milliseconds 500
+    }
+
+    throw "Timed out waiting for build completion after $TimeoutMs ms"
+}
+
+function Get-AutomationSettings($Dte) {
+    return Invoke-WithRetry -Attempts 20 -DelayMs 250 -ScriptBlock {
+        $settings = $Dte.GetObject('TcAutomationSettings')
+        if ($null -eq $settings) {
+            throw 'TcAutomationSettings is null'
+        }
+        return $settings
+    }
+}
+
+function Invoke-DteCommand {
+    param(
+        [Parameter(Mandatory = $true)]
+        $Dte,
+
+        [Parameter(Mandatory = $true)]
+        [string]$CommandName
+    )
+
+    if ([string]::IsNullOrWhiteSpace($CommandName)) {
+        throw 'CommandName is required'
+    }
+
+    $null = Get-AutomationSettings -Dte $Dte
+    try {
+        $cmd = $Dte.Commands.Item($CommandName, 0)
+    } catch {
+        throw "Command lookup failed for '$CommandName': $($_.Exception.Message)"
+    }
+
+    if ($null -eq $cmd) {
+        throw "Command not found: $CommandName"
+    }
+
+    $isAvailable = $true
+    try {
+        $isAvailable = [bool]$cmd.IsAvailable
+    } catch {
+    }
+
+    if (-not $isAvailable) {
+        throw "Command is not available in the current XAE context: $CommandName"
+    }
+
+    try {
+        $Dte.ExecuteCommand($CommandName)
+    } catch {
+        throw "ExecuteCommand failed for '$CommandName': $($_.Exception.Message)"
+    }
+
+    return @{
+        commandName = $CommandName
+        isAvailable = $isAvailable
+        executed = $true
+    }
+}
+
+function Get-TcSysManagerLibPath {
+    $candidates = @(
+        'C:\Program Files (x86)\Beckhoff\TwinCAT\Functions\TE2000-HMI-Engineering\VisualStudio\TcXaeShell\TCatSysManagerLib.dll',
+        'C:\Program Files (x86)\Beckhoff\TwinCAT\Functions\TE2000-HMI-Engineering\VisualStudio\2026\TCatSysManagerLib.dll',
+        'C:\Program Files (x86)\Beckhoff\TwinCAT\Functions\TE2000-HMI-Engineering\VisualStudio\2022\TCatSysManagerLib.dll',
+        'C:\Program Files (x86)\Beckhoff\TwinCAT\Functions\TE2000-HMI-Engineering\VisualStudio\2019\TCatSysManagerLib.dll',
+        'C:\Program Files (x86)\Beckhoff\TwinCAT\Functions\TE2000-HMI-Engineering\VisualStudio\2017\TCatSysManagerLib.dll'
+    )
+    foreach ($path in $candidates) {
+        if (Test-Path -LiteralPath $path) {
+            return $path
+        }
+    }
+    return $null
+}
+
+function Ensure-TcPlcProjectHelper {
+    # ITcPlcProject is a vtable (IUnknown) interface; PowerShell cannot cast a
+    # __ComObject to it ([Interface]$obj is not a CLR QI in PS), so the QI and
+    # member calls are done in a small compiled C# helper instead. Note the
+    # interface lives on the PLC root node (TIPC^<name>); QI also requires the
+    # interface to be registered in the 64-bit registry view for marshaling.
+    if ('Te1000PlcProjectHelper' -as [type]) {
+        return $true
+    }
+    $libPath = Get-TcSysManagerLibPath
+    if (-not $libPath) {
+        return $false
+    }
+    $null = [System.Reflection.Assembly]::LoadFrom($libPath)
+    Add-Type -ReferencedAssemblies $libPath -TypeDefinition @'
+public static class Te1000PlcProjectHelper {
+    public static bool GetAutostart(object plcProject) {
+        return ((TCatSysManagerLib.ITcPlcProject)plcProject).BootProjectAutostart;
+    }
+    public static void Deploy(object plcProject, bool autostart, bool activate) {
+        TCatSysManagerLib.ITcPlcProject typed = (TCatSysManagerLib.ITcPlcProject)plcProject;
+        typed.BootProjectAutostart = autostart;
+        typed.GenerateBootProject(activate);
+    }
+}
+'@
+    return $null -ne ('Te1000PlcProjectHelper' -as [type])
+}
+
+function Expand-UIHierarchyChildren {
+    param($Item)
+
+    $children = Get-SafeValue { $Item.UIHierarchyItems }
+    if ($null -eq $children) {
+        return $null
+    }
+    try {
+        if (-not $children.Expanded) {
+            $children.Expanded = $true
+        }
+    } catch {
+    }
+    return $children
+}
+
+function Find-UIHierarchyChildByName {
+    param($Item, [string]$Name)
+
+    $children = Expand-UIHierarchyChildren -Item $Item
+    if ($null -eq $children) {
+        return $null
+    }
+    foreach ($child in $children) {
+        $childName = Get-SafeValue { [string]$child.Name }
+        if ($childName -eq $Name) {
+            return $child
+        }
+    }
+    return $null
+}
+
+function Select-PlcProjectInSolutionExplorer {
+    # PLC login/download/logout DTE commands are selection-context-sensitive: they stay
+    # IsAvailable=false until the "<plc> Project" node is selected in Solution Explorer.
+    # ExpandView()/focus is not enough; only UIHierarchyItem.Select() establishes context.
+    param(
+        $Dte,
+        [string]$PlcItemName
+    )
+
+    $sysManager = (Get-SysManager -Dte $Dte).Value
+    $plcName = $null
+    try {
+        $tipc = $sysManager.LookupTreeItem('TIPC')
+        if ([int]$tipc.ChildCount -ge 1) {
+            $plcName = [string]$tipc.Child(1).Name
+        }
+    } catch {
+    }
+
+    if ([string]::IsNullOrWhiteSpace($PlcItemName)) {
+        if ([string]::IsNullOrWhiteSpace($plcName)) {
+            throw 'Could not determine the PLC project name from TIPC'
+        }
+        $PlcItemName = "$plcName Project"
+    }
+
+    $null = Get-SafeValue { $Dte.ExecuteCommand('View.SolutionExplorer') }
+    $solutionExplorer = $Dte.ToolWindows.SolutionExplorer
+    $rootItems = Get-SafeValue { $solutionExplorer.UIHierarchyItems }
+    if ($null -eq $rootItems -or (Get-SafeValue { [int]$rootItems.Count }) -lt 1) {
+        throw 'Solution Explorer hierarchy is empty'
+    }
+
+    $target = $null
+    $solutionNode = $rootItems.Item(1)
+    $projectNodes = Expand-UIHierarchyChildren -Item $solutionNode
+    if ($null -ne $projectNodes) {
+        foreach ($projectNode in $projectNodes) {
+            $plcFolder = Find-UIHierarchyChildByName -Item $projectNode -Name 'PLC'
+            if ($null -eq $plcFolder) {
+                continue
+            }
+
+            $plcRoots = @()
+            if (-not [string]::IsNullOrWhiteSpace($plcName)) {
+                $named = Find-UIHierarchyChildByName -Item $plcFolder -Name $plcName
+                if ($null -ne $named) {
+                    $plcRoots += $named
+                }
+            }
+            if ($plcRoots.Count -eq 0) {
+                $allRoots = Expand-UIHierarchyChildren -Item $plcFolder
+                if ($null -ne $allRoots) {
+                    foreach ($root in $allRoots) {
+                        $plcRoots += $root
+                    }
+                }
+            }
+
+            foreach ($plcRoot in $plcRoots) {
+                $target = Find-UIHierarchyChildByName -Item $plcRoot -Name $PlcItemName
+                if ($null -eq $target) {
+                    $rootChildren = Expand-UIHierarchyChildren -Item $plcRoot
+                    if ($null -ne $rootChildren) {
+                        foreach ($child in $rootChildren) {
+                            $childName = Get-SafeValue { [string]$child.Name }
+                            if ($childName -like '* Project') {
+                                $target = $child
+                                break
+                            }
+                        }
+                    }
+                }
+                if ($null -ne $target) {
+                    break
+                }
+            }
+            if ($null -ne $target) {
+                break
+            }
+        }
+    }
+
+    if ($null -eq $target) {
+        throw "Could not locate '$PlcItemName' under a PLC node in Solution Explorer"
+    }
+
+    $target.Select(1) # vsUISelectionTypeSelect
+    Start-Sleep -Milliseconds 400
+    return $PlcItemName
+}
+
+function Invoke-PlcProjectCommand {
+    param(
+        $Dte,
+        [Parameter(Mandatory = $true)]
+        [string[]]$CandidateCommands,
+        [string]$FallbackPattern,
+        [string]$PlcItemName
+    )
+
+    $settings = Get-SafeValue { Get-AutomationSettings -Dte $Dte }
+    $prevSilent = $null
+    if ($null -ne $settings) {
+        $prevSilent = Get-SafeValue { [bool]$settings.SilentMode }
+        try {
+            $settings.SilentMode = $true
+        } catch {
+        }
+    }
+
+    try {
+        $selectedItem = Select-PlcProjectInSolutionExplorer -Dte $Dte -PlcItemName $PlcItemName
+
+        $tried = @()
+        foreach ($name in $CandidateCommands) {
+            if ([string]::IsNullOrWhiteSpace($name)) {
+                continue
+            }
+            $cmd = $null
+            try {
+                $cmd = $Dte.Commands.Item($name, 0)
+            } catch {
+            }
+            if ($null -eq $cmd) {
+                $tried += "$name (not found)"
+                continue
+            }
+            $isAvailable = $true
+            try {
+                $isAvailable = [bool]$cmd.IsAvailable
+            } catch {
+            }
+            if (-not $isAvailable) {
+                $tried += "$name (unavailable)"
+                continue
+            }
+            $Dte.ExecuteCommand($name)
+            return @{
+                commandName = $name
+                executed = $true
+                selectedItem = $selectedItem
+            }
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($FallbackPattern)) {
+            foreach ($cmd in $Dte.Commands) {
+                $name = Get-SafeValue { [string]$cmd.Name }
+                if ([string]::IsNullOrWhiteSpace($name) -or $name -notmatch $FallbackPattern) {
+                    continue
+                }
+                $isAvailable = $false
+                try {
+                    $isAvailable = [bool]$cmd.IsAvailable
+                } catch {
+                }
+                if ($isAvailable) {
+                    $Dte.ExecuteCommand($name)
+                    return @{
+                        commandName = $name
+                        executed = $true
+                        selectedItem = $selectedItem
+                        viaFallbackScan = $true
+                    }
+                }
+                $tried += "$name (unavailable)"
+            }
+        }
+
+        throw ("No PLC command was available after selecting '" + $selectedItem + "' in Solution Explorer. Tried: " + ($tried -join ', '))
+    } finally {
+        if ($null -ne $settings -and $null -ne $prevSilent) {
+            try {
+                $settings.SilentMode = $prevSilent
+            } catch {
+            }
+        }
+    }
+}
+
+function Convert-SelectedItem {
+    param(
+        [Parameter(Mandatory = $true)]
+        $SelectedItem
+    )
+
+    $projectItem = Get-SafeValue { $SelectedItem.ProjectItem }
+    $projectItemObject = $null
+    if ($null -ne $projectItem) {
+        $projectItemObject = Get-SafeValue { $projectItem.Object }
+    }
+
+    return @{
+        name = Normalize-ScalarValue (Get-SafeValue { [string]$SelectedItem.Name })
+        projectName = Normalize-ScalarValue (Get-SafeValue { [string]$SelectedItem.Project.Name })
+        projectItemName = Normalize-ScalarValue (Get-SafeValue { [string]$projectItem.Name })
+        projectItemKind = Normalize-ScalarValue (Get-SafeValue { [string]$projectItem.Kind })
+        treePath = Normalize-ScalarValue (Get-SafeValue { [string]$projectItemObject.PathName })
+    }
+}
+
+function Convert-ErrorItem {
+    param(
+        [Parameter(Mandatory = $true)]
+        $ErrorItem
+    )
+
+    return @{
+        description = Normalize-ScalarValue (Get-SafeValue { [string]$ErrorItem.Description })
+        errorLevel = Normalize-ScalarValue (Get-SafeValue { [string]$ErrorItem.ErrorLevel })
+        fileName = Normalize-ScalarValue (Get-SafeValue { [string]$ErrorItem.FileName })
+        line = Normalize-ScalarValue (Get-SafeValue { [int]$ErrorItem.Line })
+        column = Normalize-ScalarValue (Get-SafeValue { [int]$ErrorItem.Column })
+        project = Normalize-ScalarValue (Get-SafeValue { [string]$ErrorItem.Project })
+    }
+}
+
+function Get-TreeItem($SysManager, [string]$TreePath) {
+    $rawItem = $SysManager.LookupTreeItem($TreePath)
+    $item = Normalize-ScalarValue $rawItem
+    if ($null -eq $item) {
+        throw "Tree item not found: $TreePath"
+    }
+    Write-Output -NoEnumerate ([ref]$item)
+    return
+}
+
+function Convert-TreeItem {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$TreeItem
+    )
+
+    $subType = $null
+    try {
+        $subType = $TreeItem.SubType
+    } catch {
+        try {
+            $subType = $TreeItem.ItemSubType
+        } catch {
+        }
+    }
+
+    return @{
+        name = Normalize-ScalarValue (Get-SafeValue { [string]$TreeItem.Name })
+        pathName = Normalize-ScalarValue (Get-SafeValue { [string]$TreeItem.PathName })
+        itemType = Normalize-ScalarValue (Get-SafeValue { [int]$TreeItem.ItemType })
+        subType = $subType
+        childCount = Get-TreeItemChildCount -TreeItem $TreeItem
+    }
+}
+
+function Get-TwinCatVariablePathCandidates {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$VariablePath
+    )
+
+    $candidates = New-Object System.Collections.Generic.List[string]
+    if (-not [string]::IsNullOrWhiteSpace($VariablePath)) {
+        $candidates.Add($VariablePath)
+    }
+
+    $parts = $VariablePath -split '\^'
+    if ($parts.Count -lt 1) {
+        return $candidates.ToArray()
+    }
+
+    $last = $parts[$parts.Count - 1]
+    $dotMatches = [regex]::Matches($last, '\.')
+    for ($i = $dotMatches.Count - 1; $i -ge 0; $i--) {
+        $chars = $last.ToCharArray()
+        for ($j = $i; $j -lt $dotMatches.Count; $j++) {
+            $chars[$dotMatches[$j].Index] = '^'
+        }
+
+        $variantParts = @($parts)
+        $variantParts[$variantParts.Count - 1] = -join $chars
+        $candidate = $variantParts -join '^'
+        if (-not $candidates.Contains($candidate)) {
+            $candidates.Add($candidate)
+        }
+    }
+
+    return $candidates.ToArray()
+}
+
+function Resolve-TwinCatVariablePath {
+    param(
+        [Parameter(Mandatory = $true)]
+        $SysManager,
+
+        [Parameter(Mandatory = $true)]
+        [string]$VariablePath
+    )
+
+    $attempts = @()
+    foreach ($candidate in (Get-TwinCatVariablePathCandidates -VariablePath $VariablePath)) {
+        try {
+            $item = (Get-TreeItem -SysManager $SysManager -TreePath $candidate).Value
+            $attempts += @{
+                path = $candidate
+                exists = $true
+                item = Convert-TreeItem -TreeItem $item
+            }
+
+            return @{
+                originalPath = $VariablePath
+                resolvedPath = $candidate
+                resolved = $true
+                attempts = $attempts
+            }
+        } catch {
+            $attempts += @{
+                path = $candidate
+                exists = $false
+                error = $_.Exception.Message
+            }
+        }
+    }
+
+    return @{
+        originalPath = $VariablePath
+        resolvedPath = $VariablePath
+        resolved = $false
+        attempts = $attempts
+    }
+}
+
+function Resolve-NcTaskPath($SysManager, [string]$RequestedTaskPath) {
+    if (-not [string]::IsNullOrWhiteSpace($RequestedTaskPath)) {
+        return $RequestedTaskPath
+    }
+
+    $motionRoot = (Get-TreeItem -SysManager $SysManager -TreePath 'TINC').Value
+    if ((Get-TreeItemChildCount -TreeItem $motionRoot) -lt 1) {
+        throw 'No NC tasks were found under TINC'
+    }
+
+    $firstTask = (Get-TreeItemChild -TreeItem $motionRoot -Index 1).Value
+    $name = Normalize-ScalarValue (Get-SafeValue { [string]$firstTask.Name })
+    if (-not [string]::IsNullOrWhiteSpace($name)) {
+        return "TINC^$name"
+    }
+
+    throw 'Unable to resolve an NC task path under TINC'
+}
+
+function Get-ChildTreeItemByName {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$ParentItem,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ChildName
+    )
+
+    $count = Get-TreeItemChildCount -TreeItem $ParentItem
+    for ($i = 1; $i -le $count; $i++) {
+        $child = (Get-TreeItemChild -TreeItem $ParentItem -Index $i).Value
+        $name = Normalize-ScalarValue (Get-SafeValue { [string]$child.Name })
+        if ($name -eq $ChildName) {
+            Write-Output -NoEnumerate ([ref]$child)
+            return
+        }
+    }
+
+    throw "Child '$ChildName' was not found under '$((Normalize-ScalarValue (Get-SafeValue { [string]$ParentItem.PathName })))'"
+}
+
+$payload = Get-Payload
+$progId = if ($payload.progId) { [string]$payload.progId } else { 'TcXaeShell.DTE.17.0' }
+$mode = if ($payload.mode) { [string]$payload.mode } else { 'active' }
+
+Ensure-ComMessageFilter
+
+try {
+    switch ($Action) {
+        'xae_status' {
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $solution = Get-SolutionInfo -Dte $dte
+            $automationSettings = $null
+            $sysManagerAvailable = $false
+
+            try {
+                $automationSettings = Get-AutomationSettings -Dte $dte
+            } catch {
+            }
+
+            try {
+                $null = Get-SysManager -Dte $dte
+                $sysManagerAvailable = $true
+            } catch {
+                $sysManagerAvailable = $false
+            }
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    progId = $progId
+                    mode = $mode
+                    solution = $solution
+                    automationSettingsAvailable = ($null -ne $automationSettings)
+                    sysManagerAvailable = $sysManagerAvailable
+                }
+            }
+            exit 0
+        }
+
+        'xae_open_solution' {
+            $solutionPath = [string]$payload.solutionPath
+            if ([string]::IsNullOrWhiteSpace($solutionPath)) {
+                throw 'solutionPath is required'
+            }
+            if (-not (Test-Path -LiteralPath $solutionPath)) {
+                throw "Solution file not found: $solutionPath"
+            }
+
+            $visible = $true
+            if ($null -ne $payload.visible) {
+                $visible = [bool]$payload.visible
+            }
+
+            $closeExisting = $false
+            if ($null -ne $payload.closeExisting) {
+                $closeExisting = [bool]$payload.closeExisting
+            }
+
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $visible
+            try {
+                $dte.MainWindow.Visible = $visible
+            } catch {
+            }
+
+            $current = Get-SolutionInfo -Dte $dte
+            if ($current.isOpen -and $closeExisting) {
+                $dte.Solution.Close($true)
+            }
+
+            $dte.Solution.Open($solutionPath)
+            $solution = Wait-ForSolutionOpen -Dte $dte -ExpectedPath $solutionPath
+            $null = Get-AutomationSettings -Dte $dte
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    progId = $progId
+                    solution = $solution
+                }
+            }
+            exit 0
+        }
+
+        'xae_list_commands' {
+            $filter = if ($payload.filter) { [string]$payload.filter } else { $null }
+            $limit = 250
+            if ($null -ne $payload.limit) {
+                $limit = [int]$payload.limit
+            }
+
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $commands = New-Object System.Collections.Generic.List[string]
+
+            foreach ($cmd in $dte.Commands) {
+                try {
+                    $name = [string]$cmd.Name
+                    if ([string]::IsNullOrWhiteSpace($name)) {
+                        continue
+                    }
+                    if ($filter -and ($name -notmatch $filter)) {
+                        continue
+                    }
+                    $commands.Add($name)
+                } catch {
+                }
+            }
+
+            $result = $commands | Sort-Object -Unique | Select-Object -First $limit
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    filter = $filter
+                    count = @($result).Count
+                    commands = @($result)
+                }
+            }
+            exit 0
+        }
+
+        'xae_execute_command' {
+            $commandName = [string]$payload.commandName
+            if ([string]::IsNullOrWhiteSpace($commandName)) {
+                throw 'commandName is required'
+            }
+            $args = if ($payload.PSObject.Properties.Name -contains 'args') { [string]$payload.args } else { '' }
+
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $null = Get-AutomationSettings -Dte $dte
+            $cmd = $dte.Commands.Item($commandName, 0)
+            if ($null -eq $cmd) {
+                throw "Command not found: $commandName"
+            }
+            $isAvailable = $true
+            try {
+                $isAvailable = [bool]$cmd.IsAvailable
+            } catch {
+            }
+            if (-not $isAvailable) {
+                throw "Command is not available in the current XAE context: $commandName"
+            }
+
+            if ([string]::IsNullOrWhiteSpace($args)) {
+                $dte.ExecuteCommand($commandName)
+            } else {
+                $dte.ExecuteCommand($commandName, $args)
+            }
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    commandName = $commandName
+                    args = $args
+                    isAvailable = $isAvailable
+                    executed = $true
+                }
+            }
+            exit 0
+        }
+
+        'xae_get_active_document' {
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $doc = Get-SafeValue { $dte.ActiveDocument }
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    hasActiveDocument = ($null -ne $doc)
+                    name = Get-SafeValue { [string]$doc.Name }
+                    fullName = Get-SafeValue { [string]$doc.FullName }
+                    kind = Get-SafeValue { [string]$doc.Kind }
+                    projectItemName = Get-SafeValue { [string]$doc.ProjectItem.Name }
+                }
+            }
+            exit 0
+        }
+
+        'xae_get_selected_items' {
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $items = @()
+            $count = 0
+
+            try {
+                $count = [int]$dte.SelectedItems.Count
+            } catch {
+            }
+
+            for ($i = 1; $i -le $count; $i++) {
+                $items += Convert-SelectedItem -SelectedItem $dte.SelectedItems.Item($i)
+            }
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    count = $count
+                    items = $items
+                }
+            }
+            exit 0
+        }
+
+        'xae_focus_tree_item' {
+            $treePath = [string]$payload.treePath
+            if ([string]::IsNullOrWhiteSpace($treePath)) {
+                throw 'treePath is required'
+            }
+
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+            $item = (Get-TreeItem -SysManager $sysManager -TreePath $treePath).Value
+            $vsProjectItem = Get-SafeValue { $item.VSProjectItem }
+            if ($null -eq $vsProjectItem) {
+                throw "No VSProjectItem is available for tree item: $treePath"
+            }
+
+            $null = Get-SafeValue { $dte.ExecuteCommand('View.SolutionExplorer') }
+            $null = Get-SafeValue { $vsProjectItem.ExpandView() }
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    treePath = $treePath
+                    expanded = $true
+                    note = 'Best effort only. XAE did not expose a reliable programmatic selection method in this environment.'
+                }
+            }
+            exit 0
+        }
+
+        'xae_get_error_list' {
+            $limit = 200
+            if ($null -ne $payload.limit) {
+                $limit = [int]$payload.limit
+            }
+
+            $errorListResult = Get-XaeErrorListItems -ProgId $progId -Limit $limit
+            if ($null -eq $errorListResult) {
+                Write-JsonResult @{
+                    ok = $true
+                    data = @{
+                        available = $false
+                        count = 0
+                        items = @()
+                    }
+                }
+                exit 0
+            }
+
+            $resultItems = @()
+            foreach ($item in $errorListResult.Items) {
+                $resultItems += @{
+                    description = Normalize-ScalarValue (Get-SafeValue { [string]$item.Description })
+                    fileName = Normalize-ScalarValue (Get-SafeValue { [string]$item.FileName })
+                    line = Normalize-ScalarValue (Get-SafeValue { [int]$item.Line })
+                    column = Normalize-ScalarValue (Get-SafeValue { [int]$item.Column })
+                    project = Normalize-ScalarValue (Get-SafeValue { [string]$item.Project })
+                    errorLevel = Normalize-ScalarValue (Get-SafeValue { [string]$item.ErrorLevel })
+                }
+            }
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    available = $true
+                    count = [int]$errorListResult.TotalCount
+                    returned = @($resultItems).Count
+                    items = $resultItems
+                }
+            }
+            exit 0
+        }
+
+        'xae_clear_error_list' {
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $showResult = Invoke-DteCommand -Dte $dte -CommandName 'View.ErrorList'
+            $clearResult = Invoke-DteCommand -Dte $dte -CommandName 'OtherContextMenus.ErrorList.Clear'
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    cleared = $true
+                    showCommand = $showResult
+                    clearCommand = $clearResult
+                }
+            }
+            exit 0
+        }
+
+        'twincat_lookup_tree_item' {
+            $treePath = [string]$payload.treePath
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+            $item = (Get-TreeItem -SysManager $sysManager -TreePath $treePath).Value
+
+            Write-JsonResult @{
+                ok = $true
+                data = Convert-TreeItem -TreeItem $item
+            }
+            exit 0
+        }
+
+        'twincat_test_item_path' {
+            $treePath = [string]$payload.treePath
+            if ([string]::IsNullOrWhiteSpace($treePath)) {
+                throw 'treePath is required'
+            }
+
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+            $exists = $false
+            try {
+                $item = (Get-TreeItem -SysManager $sysManager -TreePath $treePath).Value
+                $exists = ($null -ne $item)
+            } catch {
+                $exists = $false
+            }
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    treePath = $treePath
+                    exists = $exists
+                }
+            }
+            exit 0
+        }
+
+        'twincat_resolve_variable_path' {
+            $variablePath = [string]$payload.variablePath
+            if ([string]::IsNullOrWhiteSpace($variablePath)) {
+                throw 'variablePath is required'
+            }
+
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+            $resolution = Resolve-TwinCatVariablePath -SysManager $sysManager -VariablePath $variablePath
+
+            Write-JsonResult @{
+                ok = $true
+                data = $resolution
+            }
+            exit 0
+        }
+
+        'twincat_list_children' {
+            $treePath = [string]$payload.treePath
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+            $item = (Get-TreeItem -SysManager $sysManager -TreePath $treePath).Value
+
+            $children = @()
+            $count = Get-TreeItemChildCount -TreeItem $item
+            for ($i = 1; $i -le $count; $i++) {
+                $children += Convert-TreeItem -TreeItem (Get-TreeItemChild -TreeItem $item -Index $i).Value
+            }
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    treePath = $treePath
+                    childCount = $count
+                    children = $children
+                }
+            }
+            exit 0
+        }
+
+        'twincat_get_tree_item_xml' {
+            $treePath = [string]$payload.treePath
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+            $item = (Get-TreeItem -SysManager $sysManager -TreePath $treePath).Value
+            $xml = $item.ProduceXml()
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    treePath = $treePath
+                    xml = $xml
+                }
+            }
+            exit 0
+        }
+
+        'twincat_set_tree_item_xml' {
+            $treePath = [string]$payload.treePath
+            $xml = [string]$payload.xml
+            if ([string]::IsNullOrWhiteSpace($xml)) {
+                throw 'xml is required'
+            }
+
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+            $item = (Get-TreeItem -SysManager $sysManager -TreePath $treePath).Value
+
+            try {
+                $item.ConsumeXml($xml)
+            } catch {
+                $xmlError = $null
+                try {
+                    $xmlError = $item.GetLastXmlError()
+                } catch {
+                }
+
+                if ($xmlError) {
+                    throw "ConsumeXml failed: $xmlError"
+                }
+                throw
+            }
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    treePath = $treePath
+                    xml = $item.ProduceXml()
+                }
+            }
+            exit 0
+        }
+
+        'twincat_link_variables' {
+            $producer = [string]$payload.producer
+            $consumer = [string]$payload.consumer
+            $autoResolve = $true
+            if ($payload.PSObject.Properties.Name -contains 'autoResolve') {
+                $autoResolve = [bool]$payload.autoResolve
+            }
+            if ([string]::IsNullOrWhiteSpace($producer) -or [string]::IsNullOrWhiteSpace($consumer)) {
+                throw 'producer and consumer are required'
+            }
+
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+            $producerResolution = @{
+                originalPath = $producer
+                resolvedPath = $producer
+                resolved = $true
+                attempts = @()
+            }
+            $consumerResolution = @{
+                originalPath = $consumer
+                resolvedPath = $consumer
+                resolved = $true
+                attempts = @()
+            }
+
+            if ($autoResolve) {
+                $producerResolution = Resolve-TwinCatVariablePath -SysManager $sysManager -VariablePath $producer
+                $consumerResolution = Resolve-TwinCatVariablePath -SysManager $sysManager -VariablePath $consumer
+                $producer = [string]$producerResolution.resolvedPath
+                $consumer = [string]$consumerResolution.resolvedPath
+            }
+
+            $sysManager.LinkVariables($producer, $consumer)
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    producer = $producer
+                    consumer = $consumer
+                    producerResolution = $producerResolution
+                    consumerResolution = $consumerResolution
+                    linked = $true
+                }
+            }
+            exit 0
+        }
+
+        'twincat_unlink_variables' {
+            $variableA = [string]$payload.variableA
+            $variableB = if ($payload.PSObject.Properties.Name -contains 'variableB') { [string]$payload.variableB } else { $null }
+            if ([string]::IsNullOrWhiteSpace($variableA)) {
+                throw 'variableA is required'
+            }
+
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+
+            if ([string]::IsNullOrWhiteSpace($variableB)) {
+                $sysManager.UnlinkVariables($variableA)
+            } else {
+                $sysManager.UnlinkVariables($variableA, $variableB)
+            }
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    variableA = $variableA
+                    variableB = $variableB
+                    unlinked = $true
+                }
+            }
+            exit 0
+        }
+
+        'twincat_create_child' {
+            $parentPath = [string]$payload.parentPath
+            $childName = [string]$payload.childName
+            $subType = [int]$payload.subType
+            $beforeChildName = if ($payload.beforeChildName) { [string]$payload.beforeChildName } else { '' }
+            $createInfo = if ($payload.PSObject.Properties.Name -contains 'createInfo' -and -not [string]::IsNullOrWhiteSpace([string]$payload.createInfo)) { [string]$payload.createInfo } else { $null }
+
+            if ([string]::IsNullOrWhiteSpace($parentPath) -or [string]::IsNullOrWhiteSpace($childName)) {
+                throw 'parentPath and childName are required'
+            }
+
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+            $parent = (Get-TreeItem -SysManager $sysManager -TreePath $parentPath).Value
+            $child = $parent.CreateChild($childName, $subType, $beforeChildName, $createInfo)
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    parentPath = $parentPath
+                    child = Convert-TreeItem -TreeItem $child
+                }
+            }
+            exit 0
+        }
+
+        'twincat_delete_child' {
+            $parentPath = [string]$payload.parentPath
+            $childName = [string]$payload.childName
+            if ([string]::IsNullOrWhiteSpace($parentPath) -or [string]::IsNullOrWhiteSpace($childName)) {
+                throw 'parentPath and childName are required'
+            }
+
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+            $parent = (Get-TreeItem -SysManager $sysManager -TreePath $parentPath).Value
+            $parent.DeleteChild($childName)
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    parentPath = $parentPath
+                    childName = $childName
+                    deleted = $true
+                }
+            }
+            exit 0
+        }
+
+        'twincat_import_child' {
+            $parentPath = [string]$payload.parentPath
+            $filePath = [string]$payload.filePath
+            if ([string]::IsNullOrWhiteSpace($parentPath) -or [string]::IsNullOrWhiteSpace($filePath)) {
+                throw 'parentPath and filePath are required'
+            }
+            if (-not (Test-Path -LiteralPath $filePath)) {
+                throw "Import file not found: $filePath"
+            }
+
+            $beforeChildName = if ($payload.beforeChildName) { [string]$payload.beforeChildName } else { '' }
+            $reconnect = $true
+            if ($null -ne $payload.reconnect) {
+                $reconnect = [bool]$payload.reconnect
+            }
+            $importAsName = if ($payload.importAsName) { [string]$payload.importAsName } else { '' }
+
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+            $parent = (Get-TreeItem -SysManager $sysManager -TreePath $parentPath).Value
+            $child = $parent.ImportChild($filePath, $beforeChildName, $reconnect, $importAsName)
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    parentPath = $parentPath
+                    filePath = $filePath
+                    child = Convert-TreeItem -TreeItem $child
+                }
+            }
+            exit 0
+        }
+
+        'twincat_export_child' {
+            $parentPath = [string]$payload.parentPath
+            $childName = [string]$payload.childName
+            $filePath = [string]$payload.filePath
+            if ([string]::IsNullOrWhiteSpace($parentPath) -or [string]::IsNullOrWhiteSpace($childName) -or [string]::IsNullOrWhiteSpace($filePath)) {
+                throw 'parentPath, childName, and filePath are required'
+            }
+
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+            $parent = (Get-TreeItem -SysManager $sysManager -TreePath $parentPath).Value
+            $parent.ExportChild($childName, $filePath)
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    parentPath = $parentPath
+                    childName = $childName
+                    filePath = $filePath
+                    exported = $true
+                }
+            }
+            exit 0
+        }
+
+        'twincat_get_target_netid' {
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    targetNetId = [string]$sysManager.GetTargetNetId()
+                }
+            }
+            exit 0
+        }
+
+        'twincat_set_target_netid' {
+            $targetNetId = [string]$payload.targetNetId
+            if ([string]::IsNullOrWhiteSpace($targetNetId)) {
+                throw 'targetNetId is required'
+            }
+
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+            $sysManager.SetTargetNetId($targetNetId)
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    targetNetId = [string]$sysManager.GetTargetNetId()
+                }
+            }
+            exit 0
+        }
+
+        'twincat_get_system_manager_errors' {
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+            $messages = Get-SafeValue { [string]$sysManager.GetLastErrorMessages() }
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    messages = $messages
+                }
+            }
+            exit 0
+        }
+
+        'twincat_rescan_plc_project' {
+            $treePath = if ($payload.treePath) { [string]$payload.treePath } else { 'TIPC' }
+            $xml = '<TreeItem><PlcDef><ReScan>1</ReScan></PlcDef></TreeItem>'
+
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+            $item = (Get-TreeItem -SysManager $sysManager -TreePath $treePath).Value
+            $item.ConsumeXml($xml)
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    treePath = $treePath
+                    rescanned = $true
+                }
+            }
+            exit 0
+        }
+
+        'twincat_scan_io_boxes' {
+            $treePath = [string]$payload.treePath
+            if ([string]::IsNullOrWhiteSpace($treePath)) {
+                throw 'treePath is required'
+            }
+            $xml = '<TreeItem><DeviceDef><ScanBoxes>1</ScanBoxes></DeviceDef></TreeItem>'
+
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+            $item = (Get-TreeItem -SysManager $sysManager -TreePath $treePath).Value
+            $item.ConsumeXml($xml)
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    treePath = $treePath
+                    scanTriggered = $true
+                }
+            }
+            exit 0
+        }
+
+        'xae_save_all' {
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $dte.ExecuteCommand('File.SaveAll')
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    saved = $true
+                    solution = Get-SolutionInfo -Dte $dte
+                }
+            }
+            exit 0
+        }
+
+        'nc_list_tasks' {
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+            $motionRoot = (Get-TreeItem -SysManager $sysManager -TreePath 'TINC').Value
+            $tasks = @()
+            $count = Normalize-ScalarValue (Get-SafeValue { $motionRoot.ChildCount })
+            if ($null -eq $count) {
+                $count = 0
+            }
+            for ($i = 1; $i -le [int]$count; $i++) {
+                $child = $motionRoot.Child($i)
+                $tasks += @{
+                    name = Normalize-ScalarValue (Get-SafeValue { [string]$child.Name })
+                    pathName = Normalize-ScalarValue (Get-SafeValue { [string]$child.PathName })
+                    childCount = Normalize-ScalarValue (Get-SafeValue { [int]$child.ChildCount })
+                    itemType = Normalize-ScalarValue (Get-SafeValue { [int]$child.ItemType })
+                }
+            }
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    rootPath = 'TINC'
+                    count = @($tasks).Count
+                    tasks = $tasks
+                }
+            }
+            exit 0
+        }
+
+        'nc_list_axes' {
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+            $requestedTaskPath = $null
+            if ($payload.taskPath) {
+                $requestedTaskPath = [string]$payload.taskPath
+            }
+            $taskPath = Resolve-NcTaskPath -SysManager $sysManager -RequestedTaskPath $requestedTaskPath
+            $task = (Get-TreeItem -SysManager $sysManager -TreePath $taskPath).Value
+            $axesRoot = $task.LookupChild('Axes')
+            if ($null -eq $axesRoot) {
+                throw "Axes node was not found under task: $taskPath"
+            }
+            $axesPath = Normalize-ScalarValue (Get-SafeValue { [string]$axesRoot.PathName })
+            $axes = @()
+            $count = Normalize-ScalarValue (Get-SafeValue { $axesRoot.ChildCount })
+            if ($null -eq $count) {
+                $count = 0
+            }
+            for ($i = 1; $i -le [int]$count; $i++) {
+                $child = $axesRoot.Child($i)
+                $axes += @{
+                    name = Normalize-ScalarValue (Get-SafeValue { [string]$child.Name })
+                    pathName = Normalize-ScalarValue (Get-SafeValue { [string]$child.PathName })
+                    childCount = Normalize-ScalarValue (Get-SafeValue { [int]$child.ChildCount })
+                    itemType = Normalize-ScalarValue (Get-SafeValue { [int]$child.ItemType })
+                    itemSubType = Normalize-ScalarValue (Get-SafeValue { [int]$child.ItemSubType })
+                    itemSubTypeName = Normalize-ScalarValue (Get-SafeValue { [string]$child.ItemSubTypeName })
+                }
+            }
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    taskPath = $taskPath
+                    axesPath = $axesPath
+                    count = @($axes).Count
+                    axes = $axes
+                }
+            }
+            exit 0
+        }
+
+        'nc_get_axis_info' {
+            $axisPath = [string]$payload.axisPath
+            if ([string]::IsNullOrWhiteSpace($axisPath)) {
+                throw 'axisPath is required'
+            }
+
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+            $axesSep = $axisPath.LastIndexOf('^Axes^')
+            if ($axesSep -lt 0) {
+                throw 'axisPath must include ^Axes^ before the axis name'
+            }
+            $taskPath = $axisPath.Substring(0, $axesSep)
+            $axisName = $axisPath.Substring($axesSep + 6)
+            $task = (Get-TreeItem -SysManager $sysManager -TreePath $taskPath).Value
+            $axesRoot = $task.LookupChild('Axes')
+            if ($null -eq $axesRoot) {
+                throw "Axes node was not found under task: $taskPath"
+            }
+            $axis = (Get-ChildTreeItemByName -ParentItem $axesRoot -ChildName $axisName).Value
+            $children = @()
+            $count = Normalize-ScalarValue (Get-SafeValue { $axis.ChildCount })
+            if ($null -eq $count) {
+                $count = 0
+            }
+            for ($i = 1; $i -le [int]$count; $i++) {
+                $children += Convert-TreeItem -TreeItem $axis.Child($i)
+            }
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    axis = Convert-TreeItem -TreeItem $axis
+                    itemSubType = Get-SafeValue { [int]$axis.ItemSubType }
+                    itemSubTypeName = Get-SafeValue { [string]$axis.ItemSubTypeName }
+                    moduleTypeName = Get-SafeValue { [string]$axis.ModuleTypeName }
+                    moduleInstanceName = Get-SafeValue { [string]$axis.ModuleInstanceName }
+                    children = $children
+                }
+            }
+            exit 0
+        }
+
+        'xae_solution_build' {
+            $actionName = [string]$payload.action
+            if ([string]::IsNullOrWhiteSpace($actionName)) {
+                throw 'action is required'
+            }
+
+            $waitForFinish = $true
+            if ($null -ne $payload.waitForFinish) {
+                $waitForFinish = [bool]$payload.waitForFinish
+            }
+
+            $timeoutMs = 1800000
+            if ($null -ne $payload.timeoutMs) {
+                $timeoutMs = [int]$payload.timeoutMs
+            }
+
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $solution = Get-SolutionInfo -Dte $dte
+            if (-not $solution.isOpen) {
+                throw 'No solution is open in XAE'
+            }
+
+            $solutionBuild = $dte.Solution.SolutionBuild
+
+            switch ($actionName) {
+                'clean' {
+                    $solutionBuild.Clean($waitForFinish)
+                }
+                'build' {
+                    $solutionBuild.Build($waitForFinish)
+                }
+                'rebuild' {
+                    $solutionBuild.Clean($waitForFinish)
+                    if ($waitForFinish) {
+                        $null = Wait-ForBuildFinish -SolutionBuild $solutionBuild -TimeoutMs $timeoutMs
+                    }
+                    $solutionBuild.Build($waitForFinish)
+                }
+                default {
+                    throw "Unsupported build action: $actionName"
+                }
+            }
+
+            $buildResult = @{
+                buildState = [int]$solutionBuild.BuildState
+                lastBuildInfo = $null
+            }
+
+            if ($waitForFinish) {
+                $buildResult = Wait-ForBuildFinish -SolutionBuild $solutionBuild -TimeoutMs $timeoutMs
+            } else {
+                try {
+                    $buildResult.lastBuildInfo = [int]$solutionBuild.LastBuildInfo
+                } catch {
+                }
+            }
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    action = $actionName
+                    waited = $waitForFinish
+                    solution = $solution
+                    build = $buildResult
+                }
+            }
+            exit 0
+        }
+
+        'twincat_activate_configuration' {
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+            $sysManager.ActivateConfiguration()
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    activated = $true
+                }
+            }
+            exit 0
+        }
+
+        'plc_login' {
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $candidates = @()
+            if ($payload.commandName) { $candidates += [string]$payload.commandName }
+            $candidates += 'OtherContextMenus.PlcProject.Login'
+            $result = Invoke-PlcProjectCommand -Dte $dte -CandidateCommands $candidates -FallbackPattern '^PLC\.Loginto' -PlcItemName ([string]$payload.itemName)
+
+            Write-JsonResult @{
+                ok = $true
+                data = $result
+            }
+            exit 0
+        }
+
+        'plc_download' {
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $method = if ($payload.method) { [string]$payload.method } else { 'bootproject' }
+
+            if ($method -eq 'command') {
+                # Legacy route via the IDE command surface. Requires a shell whose DTE
+                # exposes window automation so the PLC project node can be selected
+                # (the 64-bit TcXaeShell 17.0 DTE reports Windows.Count = 0 and cannot).
+                $candidates = @()
+                if ($payload.commandName) { $candidates += [string]$payload.commandName }
+                $candidates += 'PLC.Downloadnone'
+                $result = Invoke-PlcProjectCommand -Dte $dte -CandidateCommands $candidates -FallbackPattern '^PLC\.Download' -PlcItemName ([string]$payload.itemName)
+
+                Write-JsonResult @{
+                    ok = $true
+                    data = $result
+                }
+                exit 0
+            }
+
+            # Default: headless deployment via ITcPlcProject (Beckhoff CI path).
+            # GenerateBootProject($true) writes the boot project to the target's boot
+            # directory; the runtime loads it on the next TwinCAT restart.
+            $sysManager = (Get-SysManager -Dte $dte).Value
+
+            # ITcPlcProject is implemented by the PLC root node (TIPC^<name>), NOT the
+            # nested "<name> Project" node (that one only carries ITcPlcIECProject*).
+            $treePath = [string]$payload.treePath
+            if ([string]::IsNullOrWhiteSpace($treePath)) {
+                $tipc = $sysManager.LookupTreeItem('TIPC')
+                if ([int]$tipc.ChildCount -lt 1) {
+                    throw 'No PLC project found under TIPC'
+                }
+                $plcName = [string]$tipc.Child(1).Name
+                $treePath = "TIPC^$plcName"
+            }
+
+            $plcProject = $sysManager.LookupTreeItem($treePath)
+            $autostart = $true
+            if ($null -ne $payload.autostart) {
+                $autostart = [bool]$payload.autostart
+            }
+            if (-not (Ensure-TcPlcProjectHelper)) {
+                throw 'TCatSysManagerLib.dll could not be loaded; the typed ITcPlcProject cast is required for boot project deployment on this shell'
+            }
+            [Te1000PlcProjectHelper]::Deploy($plcProject, $autostart, $true)
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    method = 'bootproject'
+                    treePath = $treePath
+                    bootProjectGenerated = $true
+                    bootProjectAutostart = $autostart
+                    targetNetId = (Get-SafeValue { [string]$sysManager.GetTargetNetId() })
+                    note = 'Boot project deployed to the target boot directory. Restart the TwinCAT runtime (twincat_restart_runtime) to load and run it.'
+                }
+            }
+            exit 0
+        }
+
+        'plc_logout' {
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $candidates = @()
+            if ($payload.commandName) { $candidates += [string]$payload.commandName }
+            $candidates += 'OtherContextMenus.PlcProject.Logout'
+            $result = Invoke-PlcProjectCommand -Dte $dte -CandidateCommands $candidates -FallbackPattern '^PLC\.Logout' -PlcItemName ([string]$payload.itemName)
+
+            Write-JsonResult @{
+                ok = $true
+                data = $result
+            }
+            exit 0
+        }
+
+        'twincat_restart_runtime' {
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+            $wasStarted = $null
+            try {
+                $wasStarted = [bool]$sysManager.IsTwinCATStarted()
+            } catch {
+            }
+
+            $sysManager.StartRestartTwinCAT()
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    restarted = $true
+                    wasStarted = $wasStarted
+                }
+            }
+            exit 0
+        }
+
+        default {
+            throw "Unsupported action: $Action"
+        }
+    }
+} catch {
+    $message = $_.Exception.Message
+    $code = Get-ErrorCode $_.Exception
+    $location = ''
+    try {
+        $location = [string]$_.InvocationInfo.PositionMessage
+    } catch {
+    }
+    if (-not [string]::IsNullOrWhiteSpace($location)) {
+        Fail("$message [$code]`n$location")
+    }
+    Fail("$message [$code]")
+}
