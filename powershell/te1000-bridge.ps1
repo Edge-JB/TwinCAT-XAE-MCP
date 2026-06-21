@@ -1736,44 +1736,57 @@ try {
             # and ARE resolvable by their full "<boxPath>^<moduleName>" path. Surface them
             # so the tree is fully discoverable by walking. This must never break a normal
             # children call, so every step is defensively guarded.
-            $boxXml = $null
-            try {
-                $boxXml = $item.ProduceXml()
-            } catch {
+            #
+            # GATE: only run this on nodes with ZERO standard children ($count -eq 0).
+            # The CPX-AP-A-EC-M12 carrier reports ChildCount == 0 (its modules are not
+            # standard children), while EtherCAT devices and normal couplers report
+            # ChildCount > 0 and carry no <Slot><Module> entries. Gating on $count -eq 0
+            # confines the expensive ProduceXml() to the actual carriers and avoids
+            # serializing+parsing the entire bus (hundreds of KB to MB) on every call —
+            # e.g. when listing the children of an EtherCAT device root.
+            # Trade-off: a hypothetical box with BOTH standard children AND slot-modules
+            # would have its modules missed here — an accepted trade for not
+            # ProduceXml-ing every node.
+            if ($count -eq 0) {
                 $boxXml = $null
-            }
-
-            if (-not [string]::IsNullOrEmpty($boxXml)) {
-                $moduleNames = @()
                 try {
-                    [xml]$doc = $boxXml
-                    foreach ($nameNode in $doc.SelectNodes('//Module/Name')) {
-                        $moduleName = [string]$nameNode.InnerText
-                        if (-not [string]::IsNullOrEmpty($moduleName)) {
-                            $moduleNames += $moduleName
-                        }
-                    }
+                    $boxXml = $item.ProduceXml()
                 } catch {
-                    $moduleNames = @()
+                    $boxXml = $null
                 }
 
-                foreach ($moduleName in $moduleNames) {
-                    if ($listedNames.Contains($moduleName)) {
-                        continue
-                    }
-                    $moduleItem = $null
+                if (-not [string]::IsNullOrEmpty($boxXml)) {
+                    $moduleNames = @()
                     try {
-                        $moduleItem = (Get-TreeItem -SysManager $sysManager -TreePath ("$treePath^" + $moduleName)).Value
+                        [xml]$doc = $boxXml
+                        foreach ($nameNode in $doc.SelectNodes('//Slot/Module/Name')) {
+                            $moduleName = [string]$nameNode.InnerText
+                            if (-not [string]::IsNullOrEmpty($moduleName)) {
+                                $moduleNames += $moduleName
+                            }
+                        }
                     } catch {
+                        $moduleNames = @()
+                    }
+
+                    foreach ($moduleName in $moduleNames) {
+                        if ($listedNames.Contains($moduleName)) {
+                            continue
+                        }
                         $moduleItem = $null
+                        try {
+                            $moduleItem = (Get-TreeItem -SysManager $sysManager -TreePath ("$treePath^" + $moduleName)).Value
+                        } catch {
+                            $moduleItem = $null
+                        }
+                        if ($null -eq $moduleItem) {
+                            continue
+                        }
+                        $moduleEntry = Convert-TreeItem -TreeItem $moduleItem
+                        $moduleEntry['kind'] = 'module'
+                        $children += $moduleEntry
+                        [void]$listedNames.Add($moduleName)
                     }
-                    if ($null -eq $moduleItem) {
-                        continue
-                    }
-                    $moduleEntry = Convert-TreeItem -TreeItem $moduleItem
-                    $moduleEntry['kind'] = 'module'
-                    $children += $moduleEntry
-                    [void]$listedNames.Add($moduleName)
                 }
             }
 

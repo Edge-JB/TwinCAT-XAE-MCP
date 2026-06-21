@@ -5,6 +5,40 @@ on real TwinCAT projects. Newest first.
 
 ---
 
+## 2026-06-20 — Fixed `twincat_list_children` ProduceXml-on-every-call regression — branch `improve/batch-ops`
+
+The CPX-AP/Festo sub-module augmentation added to `twincat_list_children` called
+`$item.ProduceXml()` and `[xml]`-parsed it on EVERY children call — including when
+listing the children of an EtherCAT *device* root, where ProduceXml serializes the
+ENTIRE bus (all boxes + PDO maps + init commands → hundreds of KB to MB) and parses
+it, every time, purely to look for sub-modules that only couplers have.
+
+Fix: the children sub-module scan is now gated to `ChildCount == 0` and the XPath is
+anchored to `//Slot/Module/Name`. The CPX-AP-A-EC-M12 carrier reports
+`ChildCount == 0` (its modules are not standard children) while devices and normal
+couplers report `ChildCount > 0` and carry no `<Slot><Module>` entries, so the gate
+confines the expensive ProduceXml to the actual carriers. The anchored XPath stops
+the old `//Module/Name` form from also matching `<Module><Name>` inside safety
+terminals and other non-slot `<Module>` elements. This removes a
+ProduceXml-on-every-call regression (was serializing the whole bus when listing a
+device's children). Accepted trade-off: a hypothetical box with BOTH standard
+children AND slot-modules would have its modules missed.
+
+---
+
+## 2026-06-20 — WON'T DO: persistent bridge (long-lived attached PowerShell + DTE) — rationale
+
+Considered keeping the PowerShell process and the attached TcXaeShell DTE alive
+across MCP calls (instead of spawn + `Get-Dte` attach per call) to cut per-call
+latency. **Declined.** TcXaeShell's COM/DTE is flaky; a long-lived attached DTE
+risks drifting out of sync with the live solution — stale tree-item handles, a lost
+target/connection, lingering modal dialogs that wedge the next call. The per-call
+spawn + attach latency is an acceptable trade because it carries NO token cost
+(it's wall-clock only, not context), and every call starts from a known-clean
+attach. Recorded here as a deliberate non-goal, not an open idea.
+
+---
+
 ## 2026-06-20 — Added `tc_tree action:create_batch` / `delete_batch` (scaffold / teardown N child nodes in one attach) — branch `improve/batch-ops`
 
 Building out (or tearing down) a set of tree children — e.g. several EtherCAT boxes
