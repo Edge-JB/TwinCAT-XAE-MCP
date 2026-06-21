@@ -284,3 +284,11 @@ offload the bulk to a subagent just to keep the main context from being buried.
 
 The two highest-leverage, lowest-risk fixes are **#1 (dedicated `rename`)** and
 **#2 (compact `set_xml` by default)**.
+
+> **Resolved 2026-06-20 (branch `improve/batch-ops`)** — idea #4 implemented:
+> `tc_tree action:get_xml summary:true` now returns the cheap identity view
+> (`name / pathName / itemType / subType / childCount` from `Convert-TreeItem`,
+> plus a `modules` array of the `//Slot/Module/Name` slot-module names) instead of
+> the full `ProduceXml()` blob. Summary mode still calls `ProduceXml()` server-side
+> to extract the module list (latency, not tokens) — the win is not returning the
+> blob. The default (no `summary`) path is unchanged.

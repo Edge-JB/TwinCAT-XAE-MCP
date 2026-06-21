@@ -1803,16 +1803,59 @@ try {
 
         'twincat_get_tree_item_xml' {
             $treePath = [string]$payload.treePath
+            $summary = $false
+            if ($payload.PSObject.Properties.Name -contains 'summary') {
+                $summary = [bool]$payload.summary
+            }
+
             $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
             $sysManager = (Get-SysManager -Dte $dte).Value
             $item = (Get-TreeItem -SysManager $sysManager -TreePath $treePath).Value
-            $xml = Strip-TreeImage $item.ProduceXml()
+
+            if (-not $summary) {
+                $xml = Strip-TreeImage $item.ProduceXml()
+
+                Write-JsonResult @{
+                    ok = $true
+                    data = @{
+                        treePath = $treePath
+                        xml = $xml
+                    }
+                }
+                exit 0
+            }
+
+            # Compact summary: identity + slot/module list, without the big XML blob.
+            $summaryData = Convert-TreeItem -TreeItem $item
+
+            $moduleNames = @()
+            $boxXml = $null
+            try {
+                $boxXml = $item.ProduceXml()
+            } catch {
+                $boxXml = $null
+            }
+            if (-not [string]::IsNullOrEmpty($boxXml)) {
+                try {
+                    [xml]$doc = $boxXml
+                    foreach ($nameNode in $doc.SelectNodes('//Slot/Module/Name')) {
+                        $moduleName = [string]$nameNode.InnerText
+                        if (-not [string]::IsNullOrEmpty($moduleName)) {
+                            $moduleNames += $moduleName
+                        }
+                    }
+                } catch {
+                    $moduleNames = @()
+                }
+            }
+
+            $summaryData['modules'] = $moduleNames
 
             Write-JsonResult @{
                 ok = $true
                 data = @{
                     treePath = $treePath
-                    xml = $xml
+                    summary = $summaryData
                 }
             }
             exit 0

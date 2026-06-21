@@ -371,13 +371,14 @@ server.registerTool(
 server.registerTool(
   "tc_tree",
   {
-    description: "TwinCAT System Manager tree items; paths use ^ separators (e.g. TIPC^MyPlc, TIID^Device 2 (EtherCAT)^Box 1). BATCH-FIRST: when acting on more than one item, use the matching *_batch action — it runs N operations in ONE DTE attach and returns a compact roll-up {count,succeeded,failed,results:[{...,ok,error?}]} (continue-on-error), instead of paying a process-spawn + attach per call. Actions, grouped single / batch: READ identity — get / get_batch (paths:[...]); TEST existence — exists / exists_batch (paths:[...]); READ xml — get_xml (ProduceXml, raw); WRITE params — set_xml / set_xml_batch (items:[{path,xml}]) (ConsumeXml; compact unless returnXml:true); RENAME — rename / rename_batch (renames:[{name|path,newName}]) (keeps IO links intact); CREATE — create / create_batch (creates:[{parent,name,subType,before?,createInfo?}]); DELETE — delete / delete_batch (deletes:[{parent,name}]). No batch form: children (lists child items, incl. CPX-AP/Festo sub-modules), import (.xti under path), export (name to file), focus (Solution Explorer).",
+    description: "TwinCAT System Manager tree items; paths use ^ separators (e.g. TIPC^MyPlc, TIID^Device 2 (EtherCAT)^Box 1). BATCH-FIRST: when acting on more than one item, use the matching *_batch action — it runs N operations in ONE DTE attach and returns a compact roll-up {count,succeeded,failed,results:[{...,ok,error?}]} (continue-on-error), instead of paying a process-spawn + attach per call. Actions, grouped single / batch: READ identity — get / get_batch (paths:[...]); TEST existence — exists / exists_batch (paths:[...]); READ xml — get_xml (ProduceXml raw XML; summary:true for a compact identity + slot-module list instead of the full blob); WRITE params — set_xml / set_xml_batch (items:[{path,xml}]) (ConsumeXml; compact unless returnXml:true); RENAME — rename / rename_batch (renames:[{name|path,newName}]) (keeps IO links intact); CREATE — create / create_batch (creates:[{parent,name,subType,before?,createInfo?}]); DELETE — delete / delete_batch (deletes:[{parent,name}]). No batch form: children (lists child items, incl. CPX-AP/Festo sub-modules), import (.xti under path), export (name to file), focus (Solution Explorer).",
     inputSchema: {
       action: z.enum(["get", "children", "exists", "exists_batch", "get_batch", "get_xml", "set_xml", "set_xml_batch", "rename", "rename_batch", "create", "create_batch", "delete", "delete_batch", "import", "export", "focus"]),
       path: z.string(),
       paths: z.array(z.string()).optional(),
       xml: z.string().optional(),
       returnXml: z.boolean().optional(),
+      summary: z.boolean().optional(),
       name: z.string().optional(),
       renames: z.array(z.object({ name: z.string().optional(), path: z.string().optional(), newName: z.string() })).optional(),
       items: z.array(z.object({ path: z.string(), xml: z.string() })).optional(),
@@ -403,7 +404,7 @@ server.registerTool(
       case "get_batch":
         need(p, ["paths"], p.action);
         return textResult(await bridgeCall("twincat_lookup_tree_items", { paths: p.paths }));
-      case "get_xml": return textResult(await bridgeCall("twincat_get_tree_item_xml", t));
+      case "get_xml": return textResult(await bridgeCall("twincat_get_tree_item_xml", { ...t, summary: p.summary === true }));
       case "set_xml":
         need(p, ["xml"], p.action);
         return textResult(await bridgeCall("twincat_set_tree_item_xml", { ...t, xml: p.xml, returnXml: p.returnXml === true }));
