@@ -5,6 +5,58 @@ on real TwinCAT projects. Newest first.
 
 ---
 
+## 2026-06-20 — `children` does not enumerate CPX-AP (Festo) sub-modules — they're undiscoverable by tree-walking
+
+### What I was doing
+Renaming a Festo CPX-AP sub-module — `Module 3 (CPX-AP-A-4IOL-M12 Variant 8)` —
+that hangs off a `CPX-AP-A-EC-M12` bus head (itself an EtherCAT box,
+`R06.LDR.N05`). The AP modules continue the rack node numbering
+(`...N06`, `...N07`, ...).
+
+### The pitfall
+`tc_tree action:children` on the `CPX-AP-A-EC-M12` box returns
+**`childCount: 0`** — yet the AP modules underneath it absolutely exist and are
+fully addressable:
+- `tc_tree action:exists path:"...^R06.LDR.N05 (CPX-AP-A-EC-M12)^Module 3 (CPX-AP-A-4IOL-M12 Variant 8)"` → `exists: true`
+- `tc_tree action:rename` on that same path → succeeds, links intact.
+
+So the modules are real tree items (`twincat_lookup_tree_item` / ConsumeXml find
+them by path), but `twincat_list_children` does **not** walk into them. Net
+effect: **you cannot discover these sub-modules through the MCP at all.** The only
+way I found `Module 3` was by grepping the on-disk `.xti`
+(`_Config/IO/Device 2 (EtherCAT)/R01.Main.N01 (EK1200).xti`) for the name. If a
+caller relied on `children` to enumerate "what still needs renaming," every
+CPX-AP / Festo AP module (IO-Link masters, valve terminals, DI/DO blocks) would be
+silently skipped — exactly the kind of silent gap that looks like "all done" when
+it isn't.
+
+Likely cause: these AP modules live in the box's XML as `<Slot><Module>` entries
+(a sub-object collection), not as standard child tree items, so whatever
+collection `twincat_list_children` iterates (`ITcSmTreeItem.Child`/`ChildCount`)
+doesn't include them — even though they ARE resolvable via `LookupTreeItem` by
+their full `^`-path.
+
+### Improvement ideas
+1. **Make `children` enumerate sub-modules.** Where a box exposes a `<Slot>/<Module>`
+   collection (CPX-AP-A-EC-M12 and similar Festo/3rd-party couplers), have
+   `twincat_list_children` fall back to (or additionally include) those module
+   entries so tree-walking discovery is complete. Tag them (e.g.
+   `kind: "module"`) so callers can tell them from real child boxes.
+2. **At minimum, signal the gap.** If `ChildCount` is 0 but the item is a coupler
+   type known to carry AP/sub-modules, include a hint in the result
+   (e.g. `hasUnlistedModules: true`) so a caller doesn't conclude the branch is empty.
+3. **Document it** in README: "CPX-AP / Festo AP modules are addressable by path
+   (`exists`/`get_xml`/`rename` work) but are not returned by `children`; discover
+   them via the box's `get_xml` `<Slot><Module>` list or the on-disk `.xti`."
+4. Consider a `get_xml summary:true` (see the entry below) that, for a coupler,
+   returns just the slot/module name list cheaply — that would double as the
+   discovery path for these modules without the full blob.
+
+The rename mechanism itself is fine here; the problem is purely **discoverability**
+via `children`.
+
+---
+
 ## 2026-06-20 — Renaming IO tree items is a token sink (no `rename`, `set_xml` echoes full XML)
 
 ### What I was doing
