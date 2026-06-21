@@ -5,6 +5,68 @@ on real TwinCAT projects. Newest first.
 
 ---
 
+## 2026-06-21 — `tc_tree action:create_rack` — ESI-backed EtherCAT rack creator — branch `improve/create-rack`
+
+**Feature.** A new `tc_tree` action `create_rack` that, given a parent path and an ordered list of
+EtherCAT module type names, creates **functional** boxes by resolving each type's descriptor from the
+stock Beckhoff ESI library, **generating a full `.xti`** (identity + PDOs + SyncMan/Fmmu) and
+**importing** it. This is the working follow-up to the create-ghost guard below: it answers "how do
+you actually add an EtherCAT box" that the ghost guard left open.
+
+**Why import, not create.** Option 3 — `CreateChild` with `subType:9099` + an ESI `createInfo`
+descriptor — was confirmed a **dead end** in live testing (rejected / ghost). And a *minimal* `.xti`
+(identity only, no PDOs) imports but yields a **hollow** box (0 PDOs, unusable). Only a **full** `.xti`
+carrying the complete PDO set + box-level `<SyncMan>`/`<Fmmu>` imports as a functional box. So the tool
+**generates the full PDO set** and uses `ImportChild`.
+
+**v1 scope (digital terminals only).** Supported: **EL1xxx digital-input** (ESI `GroupType` `DigIn`)
+and **EL2xxx digital-output** (`DigOut`), one 1-bit `BOOL` channel per PDO. Anything else — analog
+(`AnaIn`/`AnaOut`), IO-Link, mailbox/CoE devices, multi-bit or non-`BOOL` entries — is detected and
+**rejected with a clear per-entry error** rather than emitting a wrong box. Analog / IO-Link / complex
+devices are deferred to a **v2**. Highest ESI revision is chosen by default (override via `revision`).
+
+**ESI → `.xti` mapping (the translator).**
+- Identity: ESI `<Type ProductCode RevisionNo>` + Vendor `Id=2` → box `<EtherCAT VendorId="#x00000002"
+  ProductCode RevisionNo Type=<long name> Desc=<type>>`; `SlaveType="1" PdiType="#x0104"` etc. fixed.
+- PDOs: ESI `<TxPdo>` (inputs) / `<RxPdo>` (outputs) `<Index>` → `<Pdo Index= Flags="#x0011"
+  SyncMan="0">`; outputs get `InOut="1"`. `<Entry><Index>` → `Index=`, `<SubIndex>` → `Sub="#x0N"`,
+  `<DataType>BOOL</DataType>` + `<BitLen>1` → `<Type>BIT</Type>`; `<Name>` carried through.
+- `<SyncMan>`: 8-byte SM records — record 0 from the ESI process `<Sm StartAddress ControlByte>`
+  (Length=1, Enable=1), records 1–2 are the direction-fixed TwinCAT tail (different for in vs out).
+- `<Fmmu>`: two 16-byte FMMU records — record 0 maps the process SM (physAddr = SM start, dir = 1 in /
+  2 out, active = 1); record 1 is the fixed mailbox-state tail.
+
+**Validation by diff (the correctness gate).** Before wiring the live tool, the generator was anchored
+to TwinCAT's own output: real `EL1008` (digital input) and `EL2008` (digital output) boxes were
+**exported** to reference `.xti`, the matching ESI device blocks read, and the generated `.xti` diffed
+against the exports — ignoring instance noise (box `Id`, `<Name>`, `ImageId`/`ImageDatas`, `<Mappings>`,
+whitespace, attribute order) but requiring the EtherCAT identity + full `<Pdo>`/`<Entry>` + `<SyncMan>`/
+`<Fmmu>` to match. Result: **byte-for-byte identical** functional content (incl. the SyncMan/Fmmu hex
+blobs) for both EL1008 and EL2008.
+
+**Live smoke test (with cleanup).** Created a 2-module scratch rack (`EL1008` + `EL2008`) under the
+existing `EK1200` coupler with `ZZ_*` junk names, exported both back, confirmed **8 PDOs / 8 entries
+each (not hollow)** and that TwinCAT round-tripped the generated SyncMan/Fmmu unchanged, then **deleted
+both** — tree restored to exactly as found (13 children). The solution was **not saved** at any point.
+Also confirmed the error path: `EL3064` (analog `AnaIn`) and a bogus type both fail per-entry with clear
+errors, continue-on-error, no boxes emitted.
+
+**Implementation.**
+- Bridge (`te1000-bridge.ps1`): helpers `ConvertFrom-EsiHex`, `Resolve-EsiDevice(typeName, revision?)`
+  (finds the device across the ESI files, highest revision by default, errors clearly on
+  not-found/ambiguous/unsupported-class), `Get-DigitalSyncManBlob` / `Get-DigitalFmmuBlob`, and
+  `Build-BoxXti(esiDevice, boxName)`; plus a new verb `twincat_create_rack` (sequential,
+  continue-on-error, temp-file write → `ImportChild` → validate → cleanup, optional `save`).
+- `index.js`: `create_rack` added to the `tc_tree` action enum; `modules:[{type,revision?,name?}]`
+  input; `need(p,["path","modules"])`; bridges to `twincat_create_rack`; `tc_tree` description updated.
+
+**v2 ideas (deferred).** Analog terminals (multi-byte PDOs, status/control words), IO-Link masters,
+and mailbox/CoE devices (multiple SyncManagers, CoE init); per-device SyncMan/Fmmu derivation for
+terminals whose process SM differs from the simple digital profile; optional auto-link of channels to
+GVL variables after import.
+
+---
+
 ## 2026-06-21 — `tc_tree` create ghost guard (validate the created child, fail loudly) — branch `improve/test-fixes`
 
 **Bug (found in live testing).** `tc_tree action:create` on the EtherCAT device with

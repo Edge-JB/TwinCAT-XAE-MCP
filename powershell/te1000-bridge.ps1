@@ -1131,6 +1131,265 @@ function Assert-WellFormedChild {
     throw "CreateChild produced a malformed child (name='$childActualName', path='$childPath') for requested name='$RequestedName', subType=$SubType under '$ParentPath' ($reason). This usually means the subType/createInfo is not valid for this parent (EtherCAT boxes typically require a proper createInfo). No usable child was created. If a stray blank-named child remains, remove it in the XAE GUI or via close-without-save."
 }
 
+# ---------------------------------------------------------------------------
+# ESI-backed EtherCAT rack creator (create_rack)
+#
+# Resolves a Beckhoff terminal type from the stock ESI folder and GENERATES a
+# full .xti box (identity + PDOs + SyncMan/Fmmu) which is then IMPORTED under a
+# parent (proven to yield a functional, non-hollow box; a bare-subType create or
+# a PDO-less .xti yields an unusable ghost).
+#
+# v1 scope: DIGITAL terminals only -- EL1xxx digital-input (GroupType DigIn) and
+# EL2xxx digital-output (GroupType DigOut), one 1-bit BOOL entry per channel.
+# Anything else (analog, IO-Link, complex/mailbox devices) is detected and
+# rejected with a clear error rather than emitting a wrong box (deferred to v2).
+# ---------------------------------------------------------------------------
+
+$script:EsiFolder = 'C:\Program Files (x86)\Beckhoff\TwinCAT\3.1\Config\Io\EtherCAT'
+
+function ConvertFrom-EsiHex {
+    # ESI / .xti hex tokens look like "#x03f03052" or "#x12" or plain "0". Returns
+    # an [uint32]. Returns $null for empty input.
+    param([string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
+    $v = $Value.Trim()
+    if ($v.StartsWith('#x') -or $v.StartsWith('#X')) { $v = $v.Substring(2) }
+    elseif ($v.StartsWith('0x') -or $v.StartsWith('0X')) { $v = $v.Substring(2) }
+    return [Convert]::ToUInt32($v, 16)
+}
+
+function Resolve-EsiDevice {
+    # Finds a Beckhoff terminal <Device> across the ESI files by exact <Type> name.
+    # Picks the highest RevisionNo unless $Revision (e.g. "#x00120000") is given.
+    # Validates it is a supported v1 digital terminal and returns a descriptor:
+    #   @{ Type; Desc; ProductCode (uint); RevisionNo (uint); Direction ('in'|'out');
+    #      Sm=@{StartAddress(uint); ControlByte(uint)};
+    #      Pdos=@( @{Name; Index(uint); Entries=@(@{Name; Index(uint); SubIndex(int); BitLen(int); DataType}) } ) }
+    param(
+        [Parameter(Mandatory = $true)] [string]$TypeName,
+        [string]$Revision
+    )
+
+    if ([string]::IsNullOrWhiteSpace($TypeName)) { throw 'module type is required' }
+    if (-not (Test-Path -LiteralPath $script:EsiFolder)) {
+        throw "ESI folder not found: $($script:EsiFolder)"
+    }
+
+    $wantRev = $null
+    if (-not [string]::IsNullOrWhiteSpace($Revision)) { $wantRev = ConvertFrom-EsiHex $Revision }
+
+    $candidates = @()
+    foreach ($file in (Get-ChildItem -LiteralPath $script:EsiFolder -Filter '*.xml' -File)) {
+        $xml = $null
+        try { $xml = [xml](Get-Content -LiteralPath $file.FullName -Raw) } catch { continue }
+        # Vendor must be Beckhoff (Id = 2).
+        $vendorId = $null
+        try { $vendorId = ConvertFrom-EsiHex ([string]$xml.EtherCATInfo.Vendor.Id) } catch { }
+        if ($null -eq $vendorId) { try { $vendorId = [int]([string]$xml.EtherCATInfo.Vendor.Id) } catch { } }
+
+        $devNodes = $xml.SelectNodes('//Descriptions/Devices/Device')
+        if ($null -eq $devNodes) { continue }
+        foreach ($dev in $devNodes) {
+            $typeNode = $dev.SelectSingleNode('Type')
+            if ($null -eq $typeNode) { continue }
+            if (([string]$typeNode.InnerText).Trim() -ne $TypeName.Trim()) { continue }
+            $rev = ConvertFrom-EsiHex ([string]$typeNode.GetAttribute('RevisionNo'))
+            $pc = ConvertFrom-EsiHex ([string]$typeNode.GetAttribute('ProductCode'))
+            $candidates += [pscustomobject]@{ Dev = $dev; Rev = $rev; ProductCode = $pc; File = $file.Name; VendorId = $vendorId }
+        }
+    }
+
+    if ($candidates.Count -eq 0) {
+        throw "ESI device not found for type '$TypeName' under $($script:EsiFolder). Check the exact terminal name (e.g. 'EL1008')."
+    }
+
+    $chosen = $null
+    if ($null -ne $wantRev) {
+        $chosen = $candidates | Where-Object { $_.Rev -eq $wantRev } | Select-Object -First 1
+        if ($null -eq $chosen) {
+            $have = ($candidates | ForEach-Object { '#x{0:x8}' -f $_.Rev }) -join ', '
+            throw "ESI device '$TypeName' has no revision $Revision. Available: $have."
+        }
+    } else {
+        $chosen = $candidates | Sort-Object Rev -Descending | Select-Object -First 1
+    }
+
+    $dev = $chosen.Dev
+
+    # ---- v1 supported-class gate -------------------------------------------
+    $groupType = ''
+    $gtNode = $dev.SelectSingleNode('GroupType')
+    if ($null -ne $gtNode) { $groupType = ([string]$gtNode.InnerText).Trim() }
+
+    $direction = $null
+    $pdoTag = $null
+    if ($groupType -eq 'DigIn') { $direction = 'in';  $pdoTag = 'TxPdo' }
+    elseif ($groupType -eq 'DigOut') { $direction = 'out'; $pdoTag = 'RxPdo' }
+    else {
+        throw "Unsupported device class for '$TypeName' (GroupType='$groupType'). create_rack v1 supports only digital terminals (DigIn / DigOut, e.g. EL1xxx / EL2xxx). Analog / IO-Link / complex devices are deferred to v2."
+    }
+
+    # Mailbox-based devices (CoE/EoE/FoE) carry a <Mailbox> element and multiple
+    # SyncManagers; the simple v1 SyncMan/Fmmu template does not model them.
+    if ($null -ne $dev.SelectSingleNode('Mailbox')) {
+        throw "Unsupported device '$TypeName': has a Mailbox (CoE/EoE/FoE) -- not a simple digital terminal. Deferred to create_rack v2."
+    }
+
+    # Single process-data SyncManager expected. Read the one whose label matches
+    # the direction (Inputs / Outputs).
+    $smWanted = if ($direction -eq 'in') { 'Inputs' } else { 'Outputs' }
+    $smNode = $null
+    foreach ($sm in $dev.SelectNodes('Sm')) {
+        if (([string]$sm.InnerText).Trim() -eq $smWanted) { $smNode = $sm; break }
+    }
+    if ($null -eq $smNode) {
+        throw "Unsupported device '$TypeName': no '$smWanted' SyncManager found (not a simple digital terminal). Deferred to v2."
+    }
+    $smStart = ConvertFrom-EsiHex ([string]$smNode.GetAttribute('StartAddress'))
+    $smCtrl = ConvertFrom-EsiHex ([string]$smNode.GetAttribute('ControlByte'))
+    if ($null -eq $smCtrl) { $smCtrl = [uint32]0 }
+
+    # ---- PDOs --------------------------------------------------------------
+    $pdos = @()
+    foreach ($pdo in $dev.SelectNodes($pdoTag)) {
+        $pIndex = ConvertFrom-EsiHex ([string]$pdo.SelectSingleNode('Index').InnerText)
+        $pName = [string]$pdo.SelectSingleNode('Name').InnerText
+        $entries = @()
+        foreach ($e in $pdo.SelectNodes('Entry')) {
+            $eIdx = ConvertFrom-EsiHex ([string]$e.SelectSingleNode('Index').InnerText)
+            $eSubNode = $e.SelectSingleNode('SubIndex')
+            $eSub = if ($null -ne $eSubNode) { [int]([string]$eSubNode.InnerText) } else { 0 }
+            $eBitNode = $e.SelectSingleNode('BitLen')
+            $eBit = if ($null -ne $eBitNode) { [int]([string]$eBitNode.InnerText) } else { 0 }
+            $eNameNode = $e.SelectSingleNode('Name')
+            $eName = if ($null -ne $eNameNode) { [string]$eNameNode.InnerText } else { '' }
+            $eDtNode = $e.SelectSingleNode('DataType')
+            $eDt = if ($null -ne $eDtNode) { ([string]$eDtNode.InnerText).Trim() } else { '' }
+            # v1 only handles 1-bit BOOL entries (gap/padding entries have no Index/Name).
+            if ($eIdx -eq $null -or [string]::IsNullOrWhiteSpace($eName)) { continue }
+            if ($eDt -ne 'BOOL' -or $eBit -ne 1) {
+                throw "Unsupported entry in '$TypeName' PDO '$pName': DataType='$eDt' BitLen=$eBit (create_rack v1 only handles 1-bit BOOL digital channels). Deferred to v2."
+            }
+            $entries += @{ Name = $eName; Index = $eIdx; SubIndex = $eSub; BitLen = $eBit; DataType = $eDt }
+        }
+        if ($entries.Count -gt 0) {
+            $pdos += @{ Name = $pName; Index = $pIndex; Entries = $entries }
+        }
+    }
+    if ($pdos.Count -eq 0) {
+        throw "Resolved '$TypeName' but found no usable digital PDOs -- aborting rather than emitting a hollow box."
+    }
+
+    $descNode = $dev.SelectSingleNode('Name[@LcId="1033"]')
+    if ($null -eq $descNode) { $descNode = $dev.SelectSingleNode('Name') }
+    $longName = if ($null -ne $descNode) { ([string]$descNode.InnerText).Trim() } else { $TypeName }
+
+    return @{
+        Type = $longName
+        Desc = $TypeName
+        ProductCode = $chosen.ProductCode
+        RevisionNo = $chosen.Rev
+        Direction = $direction
+        Sm = @{ StartAddress = $smStart; ControlByte = $smCtrl }
+        Pdos = $pdos
+        EsiFile = $chosen.File
+    }
+}
+
+function Get-DigitalSyncManBlob {
+    # Builds the box-level <SyncMan> hex blob for a simple 1-SM digital terminal.
+    # Structure (validated by diff against real EL1008/EL2008 exports): an array of
+    # 8-byte SyncManager records; record 0 carries the live process-data SM
+    # (StartAddress, Length=1, ControlByte, Enable=1), records 1..2 are the fixed
+    # TwinCAT tail observed identically across same-direction digital terminals.
+    #   EL1008 (in):  001001000000010004000000000000000100001000010000
+    #   EL2008 (out): 000f01004400010003000000000000000000000f44090000
+    # Only SM record 0 (start+ctrl) varies with the ESI; the tail is direction-fixed.
+    param([Parameter(Mandatory = $true)][hashtable]$Esi)
+    $start = [uint32]$Esi.Sm.StartAddress
+    $ctrl = [byte]([uint32]$Esi.Sm.ControlByte)
+    $bytes = New-Object 'System.Collections.Generic.List[byte]'
+    # SM record 0: start(2 LE), len=1(2 LE), ctrl(1), status=0(1), enable=1(1), type=0(1)
+    $bytes.Add([byte]($start -band 0xff)); $bytes.Add([byte](($start -shr 8) -band 0xff))
+    $bytes.Add([byte]1); $bytes.Add([byte]0)
+    $bytes.Add($ctrl); $bytes.Add([byte]0); $bytes.Add([byte]1); $bytes.Add([byte]0)
+    if ($Esi.Direction -eq 'in') {
+        # tail: 04 00 00 00 00 00 00 00 | 01 00 00 10 00 01 00 00
+        $tail = @(0x04,0,0,0,0,0,0,0, 0x01,0,($start -band 0xff),(($start -shr 8) -band 0xff),0x00,0x01,0,0)
+    } else {
+        # tail: 03 00 00 00 00 00 00 00 | 00 00 (start LE) (ctrl) 09 00 00
+        $tail = @(0x03,0,0,0,0,0,0,0, 0x00,0x00,($start -band 0xff),(($start -shr 8) -band 0xff),$ctrl,0x09,0,0)
+    }
+    foreach ($b in $tail) { $bytes.Add([byte]$b) }
+    return (($bytes | ForEach-Object { '{0:x2}' -f $_ }) -join '')
+}
+
+function Get-DigitalFmmuBlob {
+    # Builds the box-level <Fmmu> hex blob for a simple digital terminal: two
+    # 16-byte FMMU records. Record 0 maps the process SM (physAddr = SM start,
+    # dir = 1 input / 2 output, active = 1); record 1 is the fixed mailbox-state
+    # FMMU tail observed in the real exports.
+    #   EL1008 (in):  0000000000000000 0010 00 01 01000000 02000000 000000000000 0000
+    #   EL2008 (out): 0000000000000000 000f 00 02 01000000 01000000 000000000000 0000
+    param([Parameter(Mandatory = $true)][hashtable]$Esi)
+    $start = [uint32]$Esi.Sm.StartAddress
+    $dir = if ($Esi.Direction -eq 'in') { 1 } else { 2 }
+    $rec1b8 = if ($Esi.Direction -eq 'in') { 0x02 } else { 0x01 }
+    $bytes = New-Object 'System.Collections.Generic.List[byte]'
+    # FMMU record 0
+    foreach ($b in @(0,0,0,0, 0,0, 0,0)) { $bytes.Add([byte]$b) }         # logAddr=0, len=0, startBit/stopBit=0
+    $bytes.Add([byte]($start -band 0xff)); $bytes.Add([byte](($start -shr 8) -band 0xff)) # physAddr
+    $bytes.Add([byte]0)                                                    # physStartBit
+    $bytes.Add([byte]$dir)                                                 # direction (1 in / 2 out)
+    $bytes.Add([byte]1); $bytes.Add([byte]0); $bytes.Add([byte]0); $bytes.Add([byte]0) # active=1, pad
+    # FMMU record 1 (fixed tail)
+    $bytes.Add([byte]$rec1b8)
+    foreach ($b in 1..15) { $bytes.Add([byte]0) }
+    return (($bytes | ForEach-Object { '{0:x2}' -f $_ }) -join '')
+}
+
+function Build-BoxXti {
+    # Emits a full .xti box string for a resolved digital terminal descriptor.
+    # The output matches a real TwinCAT export in every functional respect
+    # (EtherCAT identity attributes, SyncMan/Fmmu, and the complete Pdo/Entry set);
+    # instance-only noise (Box Id, ImageId/ImageDatas, <Mappings>) is intentionally
+    # minimal -- TwinCAT fills those in on import.
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$Esi,
+        [Parameter(Mandatory = $true)][string]$BoxName
+    )
+    $pc = '#x{0:x8}' -f [uint32]$Esi.ProductCode
+    $rev = '#x{0:x8}' -f [uint32]$Esi.RevisionNo
+    $inOutAttr = if ($Esi.Direction -eq 'out') { ' InOut="1"' } else { '' }
+    $syncMan = Get-DigitalSyncManBlob -Esi $Esi
+    $fmmu = Get-DigitalFmmuBlob -Esi $Esi
+
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.AppendLine('<?xml version="1.0"?>')
+    [void]$sb.AppendLine('<TcSmItem xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.beckhoff.com/schemas/2012/07/TcSmProject" TcSmVersion="1.0" TcVersion="3.1.4026.24" ClassName="CFlbTermDef" SubType="9099">')
+    [void]$sb.AppendLine('	<Box Id="1" BoxType="9099">')
+    [void]$sb.AppendLine("		<Name>$([System.Security.SecurityElement]::Escape($BoxName))</Name>")
+    [void]$sb.AppendLine('		<EtherCAT SlaveType="1" PdiType="#x0104" CycleMBoxPollingTime="0" VendorId="#x00000002" ProductCode="' + $pc + '" RevisionNo="' + $rev + '" RepeatSupport="true" PortPhys="51" MaxSlotCount="256" MaxSlotGroupCount="1" SlotPdoIncrement="1" SlotIndexIncrement="16" Type="' + [System.Security.SecurityElement]::Escape($Esi.Type) + '" Desc="' + [System.Security.SecurityElement]::Escape($Esi.Desc) + '">')
+    [void]$sb.AppendLine("			<SyncMan>$syncMan</SyncMan>")
+    [void]$sb.AppendLine("			<Fmmu>$fmmu</Fmmu>")
+    foreach ($pdo in $Esi.Pdos) {
+        $pIdx = '#x{0:x4}' -f [uint32]$pdo.Index
+        [void]$sb.AppendLine('			<Pdo Name="' + [System.Security.SecurityElement]::Escape($pdo.Name) + '" Index="' + $pIdx + '"' + $inOutAttr + ' Flags="#x0011" SyncMan="0">')
+        foreach ($e in $pdo.Entries) {
+            $eIdx = '#x{0:x4}' -f [uint32]$e.Index
+            $eSub = '#x{0:x2}' -f [int]$e.SubIndex
+            [void]$sb.AppendLine('				<Entry Name="' + [System.Security.SecurityElement]::Escape($e.Name) + '" Index="' + $eIdx + '" Sub="' + $eSub + '">')
+            [void]$sb.AppendLine('					<Type>BIT</Type>')
+            [void]$sb.AppendLine('				</Entry>')
+        }
+        [void]$sb.AppendLine('			</Pdo>')
+    }
+    [void]$sb.AppendLine('		</EtherCAT>')
+    [void]$sb.AppendLine('	</Box>')
+    [void]$sb.AppendLine('</TcSmItem>')
+    return $sb.ToString()
+}
+
 function Set-TreeItemXml($SysManager, [string]$TargetPath, [string]$Xml) {
     $item = (Get-TreeItem -SysManager $SysManager -TreePath $TargetPath).Value
 
@@ -2921,6 +3180,96 @@ try {
                     childName = $childName
                     filePath = $filePath
                     exported = $true
+                }
+            }
+            exit 0
+        }
+
+        'twincat_create_rack' {
+            # ESI-backed EtherCAT rack creator. For each requested module: resolve
+            # its descriptor from the stock ESI folder, GENERATE a full .xti
+            # (identity + PDOs + SyncMan/Fmmu) and IMPORT it under the parent.
+            # Sequential, continue-on-error; returns a compact roll-up. v1 = digital
+            # EL1xxx/EL2xxx only -- unsupported classes fail per-entry with a clear
+            # error (no wrong box emitted).
+            $parentPath = [string]$payload.parentPath
+            if ([string]::IsNullOrWhiteSpace($parentPath)) { throw 'parentPath is required' }
+            $modules = $payload.modules
+            if ($null -eq $modules -or @($modules).Count -eq 0) { throw 'modules (non-empty array) is required' }
+            $save = ($null -ne $payload.save) -and [bool]$payload.save
+
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+            $parent = (Get-TreeItem -SysManager $sysManager -TreePath $parentPath).Value
+
+            $results = @()
+            $succeeded = 0
+            $failed = 0
+            foreach ($m in @($modules)) {
+                $type = [string]$m.type
+                $revision = if ($m.PSObject.Properties.Name -contains 'revision' -and -not [string]::IsNullOrWhiteSpace([string]$m.revision)) { [string]$m.revision } else { $null }
+                $wantName = if ($m.PSObject.Properties.Name -contains 'name' -and -not [string]::IsNullOrWhiteSpace([string]$m.name)) { [string]$m.name } else { $null }
+                $tempFile = $null
+                $entry = @{ type = $type; name = $wantName; ok = $false }
+                try {
+                    if ([string]::IsNullOrWhiteSpace($type)) { throw 'module.type is required' }
+                    $esi = Resolve-EsiDevice -TypeName $type -Revision $revision
+                    # Import requires a real box name in the file; use the requested
+                    # name, else a stable temporary based on the type.
+                    $boxName = if ($wantName) { $wantName } else { $type }
+                    $xti = Build-BoxXti -Esi $esi -BoxName $boxName
+                    $tempFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), ('tc_rack_' + [System.Guid]::NewGuid().ToString('N') + '.xti'))
+                    [System.IO.File]::WriteAllText($tempFile, $xti, (New-Object System.Text.UTF8Encoding($false)))
+
+                    $importAsName = if ($wantName) { $wantName } else { '' }
+                    $child = $parent.ImportChild($tempFile, '', $true, $importAsName)
+
+                    # Validate the imported child is well-formed (non-empty name, under parent, has PDOs).
+                    $childName = Get-SafeValue { [string]$child.Name }
+                    $childPath = Get-SafeValue { [string]$child.PathName }
+                    if ([string]::IsNullOrWhiteSpace($childName)) {
+                        throw "imported child has a blank name (import produced a ghost for '$type')"
+                    }
+                    $expectedParent = $parentPath
+                    if (-not [string]::IsNullOrWhiteSpace($childPath)) {
+                        $lastSep = $childPath.LastIndexOf('^')
+                        $gotParent = if ($lastSep -ge 0) { $childPath.Substring(0, $lastSep) } else { '' }
+                        if ($gotParent -ne $expectedParent) {
+                            throw "imported child '$childName' landed under '$gotParent', expected '$expectedParent'"
+                        }
+                    }
+                    $entry.name = $childName
+                    $entry.path = $childPath
+                    $entry.productCode = '#x{0:x8}' -f [uint32]$esi.ProductCode
+                    $entry.revisionNo = '#x{0:x8}' -f [uint32]$esi.RevisionNo
+                    $entry.pdoCount = @($esi.Pdos).Count
+                    $entry.ok = $true
+                    $succeeded++
+                } catch {
+                    $entry.error = [string]$_.Exception.Message
+                    $failed++
+                } finally {
+                    if ($tempFile -and (Test-Path -LiteralPath $tempFile)) {
+                        try { Remove-Item -LiteralPath $tempFile -Force -ErrorAction Stop } catch { }
+                    }
+                }
+                $results += $entry
+            }
+
+            $saved = $null
+            if ($save) {
+                try { Save-Solution -Dte $dte; $saved = $true } catch { $saved = $false }
+            }
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    parent = $parentPath
+                    count = @($modules).Count
+                    succeeded = $succeeded
+                    failed = $failed
+                    saved = $saved
+                    results = $results
                 }
             }
             exit 0
