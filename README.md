@@ -41,7 +41,9 @@ resolve_variable*` -> `tc_link`, netid/errors/rescan/scan tools -> `tc_system`,
 - `xae` — status / open_solution / save_all / active_document / selected_items / error_list / clear_error_list / list_commands
 - `xae_build` — clean / build / rebuild
 - `xae_command` — raw DTE command (guarded)
-- `tc_tree` — get / children / exists / get_xml / set_xml / create / delete / import / export / focus
+- `tc_tree` — get / children / exists / get_xml / set_xml / rename / create / delete / import / export / focus
+  - `set_xml` returns a compact `{ treePath }` by default; pass `returnXml:true` to also echo the produced XML (with the embedded `TreeImageData16x14` bitmap stripped).
+  - **Renaming tree items:** `tc_tree action:rename path:<treePath> newName:<name>` renames an existing item (e.g. an EtherCAT box/terminal) and keeps IO links intact, returning a compact `{ treePath, newName, newPath }`. Do **not** use `set_xml`/`newName` probing for this.
 - `tc_link` — link / unlink / resolve
 - `tc_system` — get_netid / set_netid / errors / rescan_plc / scan_io_boxes
 - `nc` — tasks / axes / axis

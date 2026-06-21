@@ -371,11 +371,12 @@ server.registerTool(
 server.registerTool(
   "tc_tree",
   {
-    description: "TwinCAT tree items (paths use ^ separators, e.g. TIPC^MyPlc, TIID^Device 1 (EtherCAT)). Actions: get, children, exists, get_xml (ProduceXml, returns raw XML), set_xml (ConsumeXml, modifies parameters), create (name+subType under path), delete (name under path), import (.xti file under path), export (name under path to file), focus (best-effort Solution Explorer focus).",
+    description: "TwinCAT tree items (paths use ^ separators, e.g. TIPC^MyPlc, TIID^Device 1 (EtherCAT)). Actions: get, children, exists, get_xml (ProduceXml, returns raw XML), set_xml (ConsumeXml, modifies parameters; compact result by default, returnXml:true to echo produced XML), rename (newName; compact result, keeps IO links intact), create (name+subType under path), delete (name under path), import (.xti file under path), export (name under path to file), focus (best-effort Solution Explorer focus).",
     inputSchema: {
-      action: z.enum(["get", "children", "exists", "get_xml", "set_xml", "create", "delete", "import", "export", "focus"]),
+      action: z.enum(["get", "children", "exists", "get_xml", "set_xml", "rename", "create", "delete", "import", "export", "focus"]),
       path: z.string(),
       xml: z.string().optional(),
+      returnXml: z.boolean().optional(),
       name: z.string().optional(),
       subType: z.number().int().optional(),
       before: z.string().optional().describe("insert before this sibling"),
@@ -394,7 +395,10 @@ server.registerTool(
       case "get_xml": return textResult(await bridgeCall("twincat_get_tree_item_xml", t));
       case "set_xml":
         need(p, ["xml"], p.action);
-        return textResult(await bridgeCall("twincat_set_tree_item_xml", { ...t, xml: p.xml }));
+        return textResult(await bridgeCall("twincat_set_tree_item_xml", { ...t, xml: p.xml, returnXml: p.returnXml === true }));
+      case "rename":
+        need(p, ["newName"], p.action);
+        return textResult(await bridgeCall("twincat_rename_tree_item", { treePath: p.path, newName: p.newName }));
       case "create":
         need(p, ["name", "subType"], p.action);
         return textResult(await bridgeCall("twincat_create_child", { parentPath: p.path, childName: p.name, subType: p.subType, beforeChildName: p.before, createInfo: p.createInfo }));

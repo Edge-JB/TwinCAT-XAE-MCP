@@ -453,6 +453,19 @@ function Normalize-ScalarValue {
     return
 }
 
+function Strip-TreeImage {
+    param(
+        [Parameter(Mandatory = $false)]
+        [string]$Xml
+    )
+
+    if ([string]::IsNullOrEmpty($Xml)) {
+        return $Xml
+    }
+
+    return [regex]::Replace($Xml, '<TreeImageData16x14>.*?</TreeImageData16x14>', '', 'Singleline')
+}
+
 function Get-TreeItemChildCount {
     param(
         [Parameter(Mandatory = $true)]
@@ -1547,7 +1560,7 @@ try {
             $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
             $sysManager = (Get-SysManager -Dte $dte).Value
             $item = (Get-TreeItem -SysManager $sysManager -TreePath $treePath).Value
-            $xml = $item.ProduceXml()
+            $xml = Strip-TreeImage $item.ProduceXml()
 
             Write-JsonResult @{
                 ok = $true
@@ -1564,6 +1577,11 @@ try {
             $xml = [string]$payload.xml
             if ([string]::IsNullOrWhiteSpace($xml)) {
                 throw 'xml is required'
+            }
+
+            $returnXml = $false
+            if ($payload.PSObject.Properties.Name -contains 'returnXml') {
+                $returnXml = [bool]$payload.returnXml
             }
 
             $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
@@ -1585,11 +1603,55 @@ try {
                 throw
             }
 
+            $data = @{
+                treePath = $treePath
+            }
+            if ($returnXml) {
+                $data.xml = Strip-TreeImage $item.ProduceXml()
+            }
+
+            Write-JsonResult @{
+                ok = $true
+                data = $data
+            }
+            exit 0
+        }
+
+        'twincat_rename_tree_item' {
+            $treePath = [string]$payload.treePath
+            $newName = [string]$payload.newName
+            if ([string]::IsNullOrWhiteSpace($newName)) {
+                throw 'newName is required'
+            }
+
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+            $item = (Get-TreeItem -SysManager $sysManager -TreePath $treePath).Value
+
+            $escapedName = $newName.Replace('&', '&amp;').Replace('<', '&lt;').Replace('>', '&gt;')
+            $xml = "<TreeItem><ItemName>$escapedName</ItemName></TreeItem>"
+
+            try {
+                $item.ConsumeXml($xml)
+            } catch {
+                $xmlError = $null
+                try {
+                    $xmlError = $item.GetLastXmlError()
+                } catch {
+                }
+
+                if ($xmlError) {
+                    throw "ConsumeXml failed: $xmlError"
+                }
+                throw
+            }
+
             Write-JsonResult @{
                 ok = $true
                 data = @{
                     treePath = $treePath
-                    xml = $item.ProduceXml()
+                    newName = $newName
+                    newPath = Normalize-ScalarValue (Get-SafeValue { [string]$item.PathName })
                 }
             }
             exit 0
