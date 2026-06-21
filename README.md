@@ -41,7 +41,7 @@ resolve_variable*` -> `tc_link`, netid/errors/rescan/scan tools -> `tc_system`,
 - `xae` — status / open_solution / save_all / active_document / selected_items / error_list / clear_error_list / list_commands
 - `xae_build` — clean / build / rebuild
 - `xae_command` — raw DTE command (guarded)
-- `tc_tree` — get / children / exists / get_xml / set_xml / rename / rename_batch / create / delete / import / export / focus
+- `tc_tree` — get / children / exists / get_xml / set_xml / set_xml_batch / rename / rename_batch / create / delete / import / export / focus
   - `set_xml` returns a compact `{ treePath }` by default; pass `returnXml:true` to also echo the produced XML (with the embedded `TreeImageData16x14` bitmap stripped).
   - **Renaming tree items:** `tc_tree action:rename path:<treePath> newName:<name>` renames an existing item (e.g. an EtherCAT box/terminal) and keeps IO links intact, returning a compact `{ treePath, newName, newPath }`. Do **not** use `set_xml`/`newName` probing for this.
   - **Batch rename:** `tc_tree action:rename_batch path:<basePath> renames:[{name,newName},...]` renames many items under one parent in a single process / DTE attach. Each entry uses `name` (joined to `path` as `"<basePath>^<name>"`) or an explicit `path` (used as-is), plus `newName`. Renames run **sequentially in the given order** and one failure never aborts the rest. Returns a compact roll-up `{ parent, count, succeeded, failed, results }` where each `results[]` entry is `{ name, newName, ok }` (plus `error` on failure) — no per-item XML or path. Example:
@@ -52,6 +52,17 @@ resolve_variable*` -> `tc_link`, netid/errors/rescan/scan tools -> `tc_system`,
       renames:[
         { name:"Module 3 (CPX-AP-A-4IOL-M12 Variant 8)", newName:"Module 3 (Gripper IO-Link)" },
         { name:"Module 4 (CPX-AP-A-4DI-M8-3P)",          newName:"Module 4 (Presence DI)" }
+      ]
+    ```
+  - **Batch set_xml (ConsumeXml):** `tc_tree action:set_xml_batch items:[{path,xml},...]` pushes XML (parameter) changes into many tree items in a single process / DTE attach. Each entry needs an explicit `path` (used as-is) and an `xml` string. Items are consumed **sequentially in the given order** and one failure never aborts the rest. An entry with a missing/blank `path` or `xml` is recorded as `{ path, ok:false, error:'entry needs path and xml' }` and skipped. Returns a compact roll-up `{ count, succeeded, failed, results }` where each `results[]` entry is `{ path, ok }` (plus `error` on failure). Pass `returnXml:true` to also add `xml` (TreeImage-stripped produced XML) to each successful entry. Example:
+
+    ```
+    tc_tree action:set_xml_batch
+      items:[
+        { path:"TIID^Device 2 (EtherCAT)^Box 1^Term 5^Channel 1^PAI Settings",
+          xml:"<TreeItem>...</TreeItem>" },
+        { path:"TIID^Device 2 (EtherCAT)^Box 1^Term 6^Channel 1^PAI Settings",
+          xml:"<TreeItem>...</TreeItem>" }
       ]
     ```
   - `children` returns the standard child tree items (each tagged `kind:"child"`) **and** any addressable coupler sub-modules that live in the box's `ProduceXml()` `<Slot><Module>` collection (CPX-AP / Festo AP modules — IO-Link masters, valve terminals, DI/DO blocks) but are not in the standard `ChildCount`/`Child()` collection. Those are tagged `kind:"module"` and are resolvable by their full `^`-path. `childCount` equals the total number of entries returned (standard children + modules). The module scan is fully defensive — a malformed box or unresolvable module never breaks a normal `children` call.

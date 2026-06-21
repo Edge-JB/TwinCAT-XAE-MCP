@@ -371,14 +371,15 @@ server.registerTool(
 server.registerTool(
   "tc_tree",
   {
-    description: "TwinCAT tree items (paths use ^ separators, e.g. TIPC^MyPlc, TIID^Device 1 (EtherCAT)). Actions: get, children, exists, get_xml (ProduceXml, returns raw XML), set_xml (ConsumeXml, modifies parameters; compact result by default, returnXml:true to echo produced XML), rename (newName; compact result, keeps IO links intact), rename_batch (renames:[{name|path,newName}]; sequential, one attach, compact roll-up), create (name+subType under path), delete (name under path), import (.xti file under path), export (name under path to file), focus (best-effort Solution Explorer focus).",
+    description: "TwinCAT tree items (paths use ^ separators, e.g. TIPC^MyPlc, TIID^Device 1 (EtherCAT)). Actions: get, children, exists, get_xml (ProduceXml, returns raw XML), set_xml (ConsumeXml, modifies parameters; compact result by default, returnXml:true to echo produced XML), rename (newName; compact result, keeps IO links intact), rename_batch (renames:[{name|path,newName}]; sequential, one attach, compact roll-up), set_xml_batch (items:[{path,xml}]; sequential, one attach, compact roll-up), create (name+subType under path), delete (name under path), import (.xti file under path), export (name under path to file), focus (best-effort Solution Explorer focus).",
     inputSchema: {
-      action: z.enum(["get", "children", "exists", "get_xml", "set_xml", "rename", "rename_batch", "create", "delete", "import", "export", "focus"]),
+      action: z.enum(["get", "children", "exists", "get_xml", "set_xml", "set_xml_batch", "rename", "rename_batch", "create", "delete", "import", "export", "focus"]),
       path: z.string(),
       xml: z.string().optional(),
       returnXml: z.boolean().optional(),
       name: z.string().optional(),
       renames: z.array(z.object({ name: z.string().optional(), path: z.string().optional(), newName: z.string() })).optional(),
+      items: z.array(z.object({ path: z.string(), xml: z.string() })).optional(),
       subType: z.number().int().optional(),
       before: z.string().optional().describe("insert before this sibling"),
       createInfo: z.string().optional(),
@@ -397,6 +398,9 @@ server.registerTool(
       case "set_xml":
         need(p, ["xml"], p.action);
         return textResult(await bridgeCall("twincat_set_tree_item_xml", { ...t, xml: p.xml, returnXml: p.returnXml === true }));
+      case "set_xml_batch":
+        need(p, ["items"], p.action);
+        return textResult(await bridgeCall("twincat_set_tree_item_xml_batch", { items: p.items, returnXml: p.returnXml === true }));
       case "rename":
         need(p, ["newName"], p.action);
         return textResult(await bridgeCall("twincat_rename_tree_item", { treePath: p.path, newName: p.newName }));

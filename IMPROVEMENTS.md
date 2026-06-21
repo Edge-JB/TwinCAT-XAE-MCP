@@ -5,6 +5,26 @@ on real TwinCAT projects. Newest first.
 
 ---
 
+## 2026-06-20 — Added `tc_tree action:set_xml_batch` (one attach for N param-pushes) — branch `improve/batch-ops`
+
+Pushing parameter (XML) changes into a group of tree items — e.g. setting the same
+analog-input scaling block on every channel of a rack — previously meant one
+`tc_tree action:set_xml` (ConsumeXml) call per item, each spawning its own PowerShell
+process and doing its own `Get-Dte` / `Get-SysManager` DTE attach.
+
+`set_xml_batch` (`items:[{path,xml}]`) collapses that to **one** tool-call / process /
+DTE attach: attach once, then ConsumeXml each `path`/`xml` pair sequentially in the
+given order. One failure (or a blank `path`/`xml`) never aborts the rest
+(continue-on-error). The result is a compact roll-up `{ count, succeeded, failed,
+results }` where each entry is `{ path, ok }` (plus `error` on failure); pass
+`returnXml:true` to also echo each item's produced XML (TreeImage stripped). The single
+`twincat_set_tree_item_xml` and the new `twincat_set_tree_item_xml_batch` bridge verbs
+now share one `Set-TreeItemXml` helper (ConsumeXml + `GetLastXmlError()` reporting,
+returns the item for optional ProduceXml), mirroring how `Rename-TreeItem` and
+`Link-Variables` were factored.
+
+---
+
 ## 2026-06-20 — Added `tc_link action:link_batch` / `unlink_batch` (one attach for N links) — branch `improve/batch-ops`
 
 Wiring up IO (or tearing it down) one `tc_link action:link` call at a time has the

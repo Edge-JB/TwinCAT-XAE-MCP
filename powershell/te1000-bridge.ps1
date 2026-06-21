@@ -1073,6 +1073,27 @@ function Rename-TreeItem($SysManager, [string]$TargetPath, [string]$NewName) {
     return (Normalize-ScalarValue (Get-SafeValue { [string]$item.PathName }))
 }
 
+function Set-TreeItemXml($SysManager, [string]$TargetPath, [string]$Xml) {
+    $item = (Get-TreeItem -SysManager $SysManager -TreePath $TargetPath).Value
+
+    try {
+        $item.ConsumeXml($Xml)
+    } catch {
+        $xmlError = $null
+        try {
+            $xmlError = $item.GetLastXmlError()
+        } catch {
+        }
+
+        if ($xmlError) {
+            throw "ConsumeXml failed: $xmlError"
+        }
+        throw
+    }
+
+    return $item
+}
+
 function Link-Variables($SysManager, [string]$Producer, [string]$Consumer, [bool]$AutoResolve) {
     if ([string]::IsNullOrWhiteSpace($Producer) -or [string]::IsNullOrWhiteSpace($Consumer)) {
         throw 'producer and consumer are required'
@@ -1703,22 +1724,8 @@ try {
 
             $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
             $sysManager = (Get-SysManager -Dte $dte).Value
-            $item = (Get-TreeItem -SysManager $sysManager -TreePath $treePath).Value
 
-            try {
-                $item.ConsumeXml($xml)
-            } catch {
-                $xmlError = $null
-                try {
-                    $xmlError = $item.GetLastXmlError()
-                } catch {
-                }
-
-                if ($xmlError) {
-                    throw "ConsumeXml failed: $xmlError"
-                }
-                throw
-            }
+            $item = Set-TreeItemXml -SysManager $sysManager -TargetPath $treePath -Xml $xml
 
             $data = @{
                 treePath = $treePath
@@ -1829,6 +1836,77 @@ try {
                 data = @{
                     parent = $basePath
                     count = @($renames).Count
+                    succeeded = $succeeded
+                    failed = $failed
+                    results = $results
+                }
+            }
+            exit 0
+        }
+
+        'twincat_set_tree_item_xml_batch' {
+            $items = $payload.items
+            if ($null -eq $items -or @($items).Count -eq 0) {
+                throw 'items is required'
+            }
+
+            $returnXml = $false
+            if ($payload.PSObject.Properties.Name -contains 'returnXml') {
+                $returnXml = [bool]$payload.returnXml
+            }
+
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+
+            $results = @()
+            $succeeded = 0
+            $failed = 0
+
+            foreach ($entry in $items) {
+                $entryPath = $null
+                if ($entry.PSObject.Properties.Name -contains 'path') {
+                    $entryPath = [string]$entry.path
+                }
+                $entryXml = $null
+                if ($entry.PSObject.Properties.Name -contains 'xml') {
+                    $entryXml = [string]$entry.xml
+                }
+
+                if ([string]::IsNullOrWhiteSpace($entryPath) -or [string]::IsNullOrWhiteSpace($entryXml)) {
+                    $failed++
+                    $results += @{
+                        path = $entryPath
+                        ok = $false
+                        error = 'entry needs path and xml'
+                    }
+                    continue
+                }
+
+                try {
+                    $item = Set-TreeItemXml -SysManager $sysManager -TargetPath $entryPath -Xml $entryXml
+                    $succeeded++
+                    $entryResult = @{
+                        path = $entryPath
+                        ok = $true
+                    }
+                    if ($returnXml) {
+                        $entryResult.xml = Strip-TreeImage $item.ProduceXml()
+                    }
+                    $results += $entryResult
+                } catch {
+                    $failed++
+                    $results += @{
+                        path = $entryPath
+                        ok = $false
+                        error = [string]$_.Exception.Message
+                    }
+                }
+            }
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    count = @($items).Count
                     succeeded = $succeeded
                     failed = $failed
                     results = $results
