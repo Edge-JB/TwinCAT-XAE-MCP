@@ -1599,6 +1599,101 @@ try {
             exit 0
         }
 
+        'twincat_test_item_paths' {
+            $paths = $payload.paths
+            if ($null -eq $paths -or @($paths).Count -eq 0) {
+                throw 'paths is required'
+            }
+
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+
+            $results = @()
+            $found = 0
+            $missing = 0
+
+            foreach ($entry in $paths) {
+                $entryPath = [string]$entry
+                try {
+                    $exists = $false
+                    try {
+                        $item = (Get-TreeItem -SysManager $sysManager -TreePath $entryPath).Value
+                        $exists = ($null -ne $item)
+                    } catch {
+                        $exists = $false
+                    }
+
+                    if ($exists) { $found++ } else { $missing++ }
+                    $results += @{
+                        path = $entryPath
+                        exists = $exists
+                    }
+                } catch {
+                    $missing++
+                    $results += @{
+                        path = $entryPath
+                        exists = $false
+                        error = [string]$_.Exception.Message
+                    }
+                }
+            }
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    count = @($paths).Count
+                    found = $found
+                    missing = $missing
+                    results = $results
+                }
+            }
+            exit 0
+        }
+
+        'twincat_lookup_tree_items' {
+            $paths = $payload.paths
+            if ($null -eq $paths -or @($paths).Count -eq 0) {
+                throw 'paths is required'
+            }
+
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+
+            $results = @()
+            $succeeded = 0
+            $failed = 0
+
+            foreach ($entry in $paths) {
+                $entryPath = [string]$entry
+                try {
+                    $item = (Get-TreeItem -SysManager $sysManager -TreePath $entryPath).Value
+                    $converted = Convert-TreeItem -TreeItem $item
+                    $converted.path = $entryPath
+                    $converted.ok = $true
+                    $succeeded++
+                    $results += $converted
+                } catch {
+                    $failed++
+                    $results += @{
+                        path = $entryPath
+                        ok = $false
+                        error = [string]$_.Exception.Message
+                    }
+                }
+            }
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    count = @($paths).Count
+                    succeeded = $succeeded
+                    failed = $failed
+                    results = $results
+                }
+            }
+            exit 0
+        }
+
         'twincat_resolve_variable_path' {
             $variablePath = [string]$payload.variablePath
             if ([string]::IsNullOrWhiteSpace($variablePath)) {

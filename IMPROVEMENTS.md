@@ -5,6 +5,29 @@ on real TwinCAT projects. Newest first.
 
 ---
 
+## 2026-06-20 — Added `tc_tree action:exists_batch` / `get_batch` (one attach for N read/verify checks) — branch `improve/batch-ops`
+
+After a bulk rename / link / create it's common to want to confirm that a whole set
+of tree paths now resolve (or that the old ones are gone), or to pull back the
+identity of many items at once. Done one path at a time that's N `tc_tree
+action:exists` / `action:get` calls, each spawning its own PowerShell process and
+doing its own `Get-Dte` / `Get-SysManager` DTE attach.
+
+`exists_batch` (`paths:[...]`) and `get_batch` (`paths:[...]`) collapse that to **one**
+tool-call / process / DTE attach: attach once, then check / look up each path
+sequentially in the given order. Both are read-only — a bad path never aborts the
+loop (continue-on-error). `exists_batch` replicates the single `exists` existence
+test (resolve via `Get-TreeItem`, `exists = $null -ne $item`, swallow throws as
+`exists:false`) and returns a compact `{ count, found, missing, results }` of
+`{ path, exists }` entries. `get_batch` resolves via `Get-TreeItem` then reuses the
+shared `Convert-TreeItem` helper, returning `{ count, succeeded, failed, results }`
+where each found entry is the Convert-TreeItem shape (name / pathName / itemType /
+subType / childCount) plus `path` + `ok:true`, and a miss is `{ path, ok:false, error }`.
+Field naming matches the existing `rename_batch` / `set_xml_batch` / link-batch
+roll-ups.
+
+---
+
 ## 2026-06-20 — Added `tc_tree action:set_xml_batch` (one attach for N param-pushes) — branch `improve/batch-ops`
 
 Pushing parameter (XML) changes into a group of tree items — e.g. setting the same

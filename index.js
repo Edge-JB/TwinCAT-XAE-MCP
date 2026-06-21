@@ -371,10 +371,11 @@ server.registerTool(
 server.registerTool(
   "tc_tree",
   {
-    description: "TwinCAT tree items (paths use ^ separators, e.g. TIPC^MyPlc, TIID^Device 1 (EtherCAT)). Actions: get, children, exists, get_xml (ProduceXml, returns raw XML), set_xml (ConsumeXml, modifies parameters; compact result by default, returnXml:true to echo produced XML), rename (newName; compact result, keeps IO links intact), rename_batch (renames:[{name|path,newName}]; sequential, one attach, compact roll-up), set_xml_batch (items:[{path,xml}]; sequential, one attach, compact roll-up), create (name+subType under path), delete (name under path), import (.xti file under path), export (name under path to file), focus (best-effort Solution Explorer focus).",
+    description: "TwinCAT tree items (paths use ^ separators, e.g. TIPC^MyPlc, TIID^Device 1 (EtherCAT)). Actions: get, children, exists, exists_batch (paths:[...]; one attach, compact roll-up of existence), get_batch (paths:[...]; one attach, compact roll-up of identity), get_xml (ProduceXml, returns raw XML), set_xml (ConsumeXml, modifies parameters; compact result by default, returnXml:true to echo produced XML), rename (newName; compact result, keeps IO links intact), rename_batch (renames:[{name|path,newName}]; sequential, one attach, compact roll-up), set_xml_batch (items:[{path,xml}]; sequential, one attach, compact roll-up), create (name+subType under path), delete (name under path), import (.xti file under path), export (name under path to file), focus (best-effort Solution Explorer focus).",
     inputSchema: {
-      action: z.enum(["get", "children", "exists", "get_xml", "set_xml", "set_xml_batch", "rename", "rename_batch", "create", "delete", "import", "export", "focus"]),
+      action: z.enum(["get", "children", "exists", "exists_batch", "get_batch", "get_xml", "set_xml", "set_xml_batch", "rename", "rename_batch", "create", "delete", "import", "export", "focus"]),
       path: z.string(),
+      paths: z.array(z.string()).optional(),
       xml: z.string().optional(),
       returnXml: z.boolean().optional(),
       name: z.string().optional(),
@@ -394,6 +395,12 @@ server.registerTool(
       case "get": return textResult(await bridgeCall("twincat_lookup_tree_item", t));
       case "children": return textResult(await bridgeCall("twincat_list_children", t));
       case "exists": return textResult(await bridgeCall("twincat_test_item_path", t));
+      case "exists_batch":
+        need(p, ["paths"], p.action);
+        return textResult(await bridgeCall("twincat_test_item_paths", { paths: p.paths }));
+      case "get_batch":
+        need(p, ["paths"], p.action);
+        return textResult(await bridgeCall("twincat_lookup_tree_items", { paths: p.paths }));
       case "get_xml": return textResult(await bridgeCall("twincat_get_tree_item_xml", t));
       case "set_xml":
         need(p, ["xml"], p.action);

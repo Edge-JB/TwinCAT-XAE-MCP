@@ -41,7 +41,7 @@ resolve_variable*` -> `tc_link`, netid/errors/rescan/scan tools -> `tc_system`,
 - `xae` — status / open_solution / save_all / active_document / selected_items / error_list / clear_error_list / list_commands
 - `xae_build` — clean / build / rebuild
 - `xae_command` — raw DTE command (guarded)
-- `tc_tree` — get / children / exists / get_xml / set_xml / set_xml_batch / rename / rename_batch / create / delete / import / export / focus
+- `tc_tree` — get / children / exists / exists_batch / get_batch / get_xml / set_xml / set_xml_batch / rename / rename_batch / create / delete / import / export / focus
   - `set_xml` returns a compact `{ treePath }` by default; pass `returnXml:true` to also echo the produced XML (with the embedded `TreeImageData16x14` bitmap stripped).
   - **Renaming tree items:** `tc_tree action:rename path:<treePath> newName:<name>` renames an existing item (e.g. an EtherCAT box/terminal) and keeps IO links intact, returning a compact `{ treePath, newName, newPath }`. Do **not** use `set_xml`/`newName` probing for this.
   - **Batch rename:** `tc_tree action:rename_batch path:<basePath> renames:[{name,newName},...]` renames many items under one parent in a single process / DTE attach. Each entry uses `name` (joined to `path` as `"<basePath>^<name>"`) or an explicit `path` (used as-is), plus `newName`. Renames run **sequentially in the given order** and one failure never aborts the rest. Returns a compact roll-up `{ parent, count, succeeded, failed, results }` where each `results[]` entry is `{ name, newName, ok }` (plus `error` on failure) — no per-item XML or path. Example:
@@ -63,6 +63,21 @@ resolve_variable*` -> `tc_link`, netid/errors/rescan/scan tools -> `tc_system`,
           xml:"<TreeItem>...</TreeItem>" },
         { path:"TIID^Device 2 (EtherCAT)^Box 1^Term 6^Channel 1^PAI Settings",
           xml:"<TreeItem>...</TreeItem>" }
+      ]
+    ```
+  - **Batch read/verify:** `tc_tree action:exists_batch paths:[...]` checks existence for many `^`-paths, and `action:get_batch paths:[...]` looks up their identity (name / pathName / itemType / childCount), each in a **single** process / DTE attach — ideal for verifying many paths after a bulk rename / link / create. Paths run **sequentially in the given order** and a bad path never aborts the rest. `exists_batch` returns `{ count, found, missing, results }` where each entry is `{ path, exists }` (plus `error` if the check threw); `get_batch` returns `{ count, succeeded, failed, results }` where each found entry is the `Convert-TreeItem` shape (`name`, `pathName`, `itemType`, `subType`, `childCount`) plus `path` + `ok:true`, and a miss is `{ path, ok:false, error }`. Examples:
+
+    ```
+    tc_tree action:exists_batch
+      paths:[
+        "TIID^Device 2 (EtherCAT)^Term 1 (EK1200)",
+        "TIID^Device 2 (EtherCAT)^Term 2 (EL1008)"
+      ]
+
+    tc_tree action:get_batch
+      paths:[
+        "TIID^Device 2 (EtherCAT)^Term 1 (EK1200)",
+        "TIPC^Cabsort Lite^Cabsort Lite Instance"
       ]
     ```
   - `children` returns the standard child tree items (each tagged `kind:"child"`) **and** any addressable coupler sub-modules that live in the box's `ProduceXml()` `<Slot><Module>` collection (CPX-AP / Festo AP modules — IO-Link masters, valve terminals, DI/DO blocks) but are not in the standard `ChildCount`/`Child()` collection. Those are tagged `kind:"module"` and are resolvable by their full `^`-path. `childCount` equals the total number of entries returned (standard children + modules). The module scan is fully defensive — a malformed box or unresolvable module never breaks a normal `children` call.
