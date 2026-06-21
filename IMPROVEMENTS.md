@@ -5,6 +5,25 @@ on real TwinCAT projects. Newest first.
 
 ---
 
+## 2026-06-20 — Added `tc_link action:link_batch` / `unlink_batch` (one attach for N links) — branch `improve/batch-ops`
+
+Wiring up IO (or tearing it down) one `tc_link action:link` call at a time has the
+same papercut as single renames: every call spawns its own PowerShell process and
+does its own `Get-Dte` / `Get-SysManager` DTE attach. Linking a rack of channels is
+N tool-calls × N attaches.
+
+`link_batch` (`links:[{a,b}]`) and `unlink_batch` (`links:[{a,b?}]`) collapse that to
+**one** tool-call / process / DTE attach: attach once, then link/unlink each pair
+sequentially in the given order. One failure never aborts the rest (continue-on-error).
+The result is a verbose per-entry roll-up `{ count, succeeded, failed, results }`; each
+`link_batch` entry reports the **resolved** `^`-path forms each side was linked through
+(`resolvedA`/`resolvedB`) so you can confirm the dot→`^` subitem resolution that
+actually happened. The single `twincat_link_variables` and the new
+`twincat_link_variables_batch` bridge verbs now share one `Link-Variables` helper
+(resolve-then-`LinkVariables`), mirroring how `Rename-TreeItem` was factored.
+
+---
+
 ## 2026-06-20 — Added `tc_tree action:rename_batch` (one attach for N renames) — branch `improve/rename-batch`
 
 Renaming a group of items (e.g. every CPX-AP sub-module under a coupler) previously

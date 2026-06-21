@@ -1073,6 +1073,42 @@ function Rename-TreeItem($SysManager, [string]$TargetPath, [string]$NewName) {
     return (Normalize-ScalarValue (Get-SafeValue { [string]$item.PathName }))
 }
 
+function Link-Variables($SysManager, [string]$Producer, [string]$Consumer, [bool]$AutoResolve) {
+    if ([string]::IsNullOrWhiteSpace($Producer) -or [string]::IsNullOrWhiteSpace($Consumer)) {
+        throw 'producer and consumer are required'
+    }
+
+    $producerResolution = @{
+        originalPath = $Producer
+        resolvedPath = $Producer
+        resolved = $true
+        attempts = @()
+    }
+    $consumerResolution = @{
+        originalPath = $Consumer
+        resolvedPath = $Consumer
+        resolved = $true
+        attempts = @()
+    }
+
+    if ($AutoResolve) {
+        $producerResolution = Resolve-TwinCatVariablePath -SysManager $SysManager -VariablePath $Producer
+        $consumerResolution = Resolve-TwinCatVariablePath -SysManager $SysManager -VariablePath $Consumer
+        $Producer = [string]$producerResolution.resolvedPath
+        $Consumer = [string]$consumerResolution.resolvedPath
+    }
+
+    $SysManager.LinkVariables($Producer, $Consumer)
+
+    return @{
+        producer = $Producer
+        consumer = $Consumer
+        producerResolution = $producerResolution
+        consumerResolution = $consumerResolution
+        linked = $true
+    }
+}
+
 function Convert-TreeItem {
     param(
         [Parameter(Mandatory = $true)]
@@ -1814,36 +1850,82 @@ try {
 
             $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
             $sysManager = (Get-SysManager -Dte $dte).Value
-            $producerResolution = @{
-                originalPath = $producer
-                resolvedPath = $producer
-                resolved = $true
-                attempts = @()
+
+            $result = Link-Variables -SysManager $sysManager -Producer $producer -Consumer $consumer -AutoResolve $autoResolve
+
+            Write-JsonResult @{
+                ok = $true
+                data = $result
             }
-            $consumerResolution = @{
-                originalPath = $consumer
-                resolvedPath = $consumer
-                resolved = $true
-                attempts = @()
+            exit 0
+        }
+
+        'twincat_link_variables_batch' {
+            $links = $payload.links
+            if ($null -eq $links -or @($links).Count -eq 0) {
+                throw 'links is required'
+            }
+            $autoResolve = $true
+            if ($payload.PSObject.Properties.Name -contains 'autoResolve') {
+                $autoResolve = [bool]$payload.autoResolve
             }
 
-            if ($autoResolve) {
-                $producerResolution = Resolve-TwinCatVariablePath -SysManager $sysManager -VariablePath $producer
-                $consumerResolution = Resolve-TwinCatVariablePath -SysManager $sysManager -VariablePath $consumer
-                $producer = [string]$producerResolution.resolvedPath
-                $consumer = [string]$consumerResolution.resolvedPath
-            }
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
 
-            $sysManager.LinkVariables($producer, $consumer)
+            $results = @()
+            $succeeded = 0
+            $failed = 0
+
+            foreach ($entry in $links) {
+                $entryA = $null
+                if ($entry.PSObject.Properties.Name -contains 'a') {
+                    $entryA = [string]$entry.a
+                }
+                $entryB = $null
+                if ($entry.PSObject.Properties.Name -contains 'b') {
+                    $entryB = [string]$entry.b
+                }
+
+                if ([string]::IsNullOrWhiteSpace($entryA) -or [string]::IsNullOrWhiteSpace($entryB)) {
+                    $failed++
+                    $results += @{
+                        a = $entryA
+                        b = $entryB
+                        ok = $false
+                        error = 'entry needs a and b'
+                    }
+                    continue
+                }
+
+                try {
+                    $linkResult = Link-Variables -SysManager $sysManager -Producer $entryA -Consumer $entryB -AutoResolve $autoResolve
+                    $succeeded++
+                    $results += @{
+                        a = $entryA
+                        b = $entryB
+                        resolvedA = [string]$linkResult.producerResolution.resolvedPath
+                        resolvedB = [string]$linkResult.consumerResolution.resolvedPath
+                        ok = $true
+                    }
+                } catch {
+                    $failed++
+                    $results += @{
+                        a = $entryA
+                        b = $entryB
+                        ok = $false
+                        error = [string]$_.Exception.Message
+                    }
+                }
+            }
 
             Write-JsonResult @{
                 ok = $true
                 data = @{
-                    producer = $producer
-                    consumer = $consumer
-                    producerResolution = $producerResolution
-                    consumerResolution = $consumerResolution
-                    linked = $true
+                    count = @($links).Count
+                    succeeded = $succeeded
+                    failed = $failed
+                    results = $results
                 }
             }
             exit 0
@@ -1871,6 +1953,75 @@ try {
                     variableA = $variableA
                     variableB = $variableB
                     unlinked = $true
+                }
+            }
+            exit 0
+        }
+
+        'twincat_unlink_variables_batch' {
+            $links = $payload.links
+            if ($null -eq $links -or @($links).Count -eq 0) {
+                throw 'links is required'
+            }
+
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+
+            $results = @()
+            $succeeded = 0
+            $failed = 0
+
+            foreach ($entry in $links) {
+                $entryA = $null
+                if ($entry.PSObject.Properties.Name -contains 'a') {
+                    $entryA = [string]$entry.a
+                }
+                $entryB = $null
+                if ($entry.PSObject.Properties.Name -contains 'b') {
+                    $entryB = [string]$entry.b
+                }
+
+                if ([string]::IsNullOrWhiteSpace($entryA)) {
+                    $failed++
+                    $results += @{
+                        a = $entryA
+                        b = $entryB
+                        ok = $false
+                        error = 'entry needs a'
+                    }
+                    continue
+                }
+
+                try {
+                    if ([string]::IsNullOrWhiteSpace($entryB)) {
+                        $sysManager.UnlinkVariables($entryA)
+                    } else {
+                        $sysManager.UnlinkVariables($entryA, $entryB)
+                    }
+                    $succeeded++
+                    $results += @{
+                        a = $entryA
+                        b = $entryB
+                        ok = $true
+                    }
+                } catch {
+                    $failed++
+                    $results += @{
+                        a = $entryA
+                        b = $entryB
+                        ok = $false
+                        error = [string]$_.Exception.Message
+                    }
+                }
+            }
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    count = @($links).Count
+                    succeeded = $succeeded
+                    failed = $failed
+                    results = $results
                 }
             }
             exit 0

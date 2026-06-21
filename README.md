@@ -55,7 +55,18 @@ resolve_variable*` -> `tc_link`, netid/errors/rescan/scan tools -> `tc_system`,
       ]
     ```
   - `children` returns the standard child tree items (each tagged `kind:"child"`) **and** any addressable coupler sub-modules that live in the box's `ProduceXml()` `<Slot><Module>` collection (CPX-AP / Festo AP modules — IO-Link masters, valve terminals, DI/DO blocks) but are not in the standard `ChildCount`/`Child()` collection. Those are tagged `kind:"module"` and are resolvable by their full `^`-path. `childCount` equals the total number of entries returned (standard children + modules). The module scan is fully defensive — a malformed box or unresolvable module never breaks a normal `children` call.
-- `tc_link` — link / unlink / resolve
+- `tc_link` — link / unlink / resolve / link_batch / unlink_batch
+  - **Batch link/unlink:** `tc_link action:link_batch links:[{a,b},...]` links many variable pairs (and `action:unlink_batch links:[{a,b?},...]` unlinks them — `b` optional, `a` alone removes all of `a`'s links) in a single process / DTE attach. Pairs run **sequentially in the given order** and one failure never aborts the rest. Returns a verbose per-entry roll-up `{ count, succeeded, failed, results }`; each `link_batch` `results[]` entry is `{ a, b, resolvedA, resolvedB, ok }` (the resolved `^`-path forms each side was actually linked through), or `{ a, b, ok:false, error }` on failure. Example:
+
+    ```
+    tc_link action:link_batch
+      links:[
+        { a:"TIPC^Cabsort Lite^Cabsort Lite Instance^PlcTask Inputs^MAIN.bStart",
+          b:"TIID^Device 2 (EtherCAT)^Term 1^Channel 1^Input" },
+        { a:"TIPC^Cabsort Lite^Cabsort Lite Instance^PlcTask Outputs^MAIN.bRun",
+          b:"TIID^Device 2 (EtherCAT)^Term 2^Channel 1^Output" }
+      ]
+    ```
 - `tc_system` — get_netid / set_netid / errors / rescan_plc / scan_io_boxes
 - `nc` — tasks / axes / axis
 - `plc_download` — bootproject (default, headless ITcPlcProject deploy) or legacy command route

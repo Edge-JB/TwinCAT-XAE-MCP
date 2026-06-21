@@ -423,20 +423,29 @@ server.registerTool(
 server.registerTool(
   "tc_link",
   {
-    description: "Variable links: link (a=source, b=destination), unlink (a, optional b; a alone removes all its links), resolve (report valid path forms for a). Dot-form PLC subfields auto-resolve to XAE ^ subitem form.",
+    description: "Variable links: link (a=source, b=destination), unlink (a, optional b; a alone removes all its links), resolve (report valid path forms for a), link_batch (links:[{a,b}]) and unlink_batch (links:[{a,b?}]) — sequential, one attach, verbose per-entry roll-up. Dot-form PLC subfields auto-resolve to XAE ^ subitem form.",
     inputSchema: {
-      action: z.enum(["link", "unlink", "resolve"]),
+      action: z.enum(["link", "unlink", "resolve", "link_batch", "unlink_batch"]),
       a: z.string(),
       b: z.string().optional(),
       autoResolve: z.boolean().default(true),
+      links: z.array(z.object({ a: z.string(), b: z.string().optional() })).optional(),
     },
   },
-  async ({ action, a, b, autoResolve }) => {
+  async ({ action, a, b, autoResolve, links }) => {
     if (action === "link") {
       need({ b }, ["b"], action);
       return textResult(await bridgeCall("twincat_link_variables", { producer: a, consumer: b, autoResolve }));
     }
     if (action === "unlink") return textResult(await bridgeCall("twincat_unlink_variables", { variableA: a, variableB: b }));
+    if (action === "link_batch") {
+      need({ links }, ["links"], action);
+      return textResult(await bridgeCall("twincat_link_variables_batch", { links, autoResolve }));
+    }
+    if (action === "unlink_batch") {
+      need({ links }, ["links"], action);
+      return textResult(await bridgeCall("twincat_unlink_variables_batch", { links }));
+    }
     return textResult(await bridgeCall("twincat_resolve_variable_path", { variablePath: a }));
   },
 );
