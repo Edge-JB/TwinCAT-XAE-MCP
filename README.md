@@ -44,6 +44,7 @@ resolve_variable*` -> `tc_link`, netid/errors/rescan/scan tools -> `tc_system`,
 - `tc_tree` — get / children / exists / get_xml / set_xml / rename / create / delete / import / export / focus
   - `set_xml` returns a compact `{ treePath }` by default; pass `returnXml:true` to also echo the produced XML (with the embedded `TreeImageData16x14` bitmap stripped).
   - **Renaming tree items:** `tc_tree action:rename path:<treePath> newName:<name>` renames an existing item (e.g. an EtherCAT box/terminal) and keeps IO links intact, returning a compact `{ treePath, newName, newPath }`. Do **not** use `set_xml`/`newName` probing for this.
+  - `children` returns the standard child tree items (each tagged `kind:"child"`) **and** any addressable coupler sub-modules that live in the box's `ProduceXml()` `<Slot><Module>` collection (CPX-AP / Festo AP modules — IO-Link masters, valve terminals, DI/DO blocks) but are not in the standard `ChildCount`/`Child()` collection. Those are tagged `kind:"module"` and are resolvable by their full `^`-path. `childCount` equals the total number of entries returned (standard children + modules). The module scan is fully defensive — a malformed box or unresolvable module never breaks a normal `children` call.
 - `tc_link` — link / unlink / resolve
 - `tc_system` — get_netid / set_netid / errors / rescan_plc / scan_io_boxes
 - `nc` — tasks / axes / axis

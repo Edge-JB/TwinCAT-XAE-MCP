@@ -1540,15 +1540,69 @@ try {
 
             $children = @()
             $count = Get-TreeItemChildCount -TreeItem $item
+            $listedNames = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
             for ($i = 1; $i -le $count; $i++) {
-                $children += Convert-TreeItem -TreeItem (Get-TreeItemChild -TreeItem $item -Index $i).Value
+                $childEntry = Convert-TreeItem -TreeItem (Get-TreeItemChild -TreeItem $item -Index $i).Value
+                $childEntry['kind'] = 'child'
+                $children += $childEntry
+                $childName = [string]$childEntry['name']
+                if (-not [string]::IsNullOrEmpty($childName)) {
+                    [void]$listedNames.Add($childName)
+                }
+            }
+
+            # Augmentation: some boxes (e.g. Festo CPX-AP-A-EC-M12 EtherCAT couplers)
+            # carry addressable sub-modules that are NOT in the standard Child/ChildCount
+            # collection but DO live in the box's ProduceXml() as <Slot><Module> entries
+            # and ARE resolvable by their full "<boxPath>^<moduleName>" path. Surface them
+            # so the tree is fully discoverable by walking. This must never break a normal
+            # children call, so every step is defensively guarded.
+            $boxXml = $null
+            try {
+                $boxXml = $item.ProduceXml()
+            } catch {
+                $boxXml = $null
+            }
+
+            if (-not [string]::IsNullOrEmpty($boxXml)) {
+                $moduleNames = @()
+                try {
+                    [xml]$doc = $boxXml
+                    foreach ($nameNode in $doc.SelectNodes('//Module/Name')) {
+                        $moduleName = [string]$nameNode.InnerText
+                        if (-not [string]::IsNullOrEmpty($moduleName)) {
+                            $moduleNames += $moduleName
+                        }
+                    }
+                } catch {
+                    $moduleNames = @()
+                }
+
+                foreach ($moduleName in $moduleNames) {
+                    if ($listedNames.Contains($moduleName)) {
+                        continue
+                    }
+                    $moduleItem = $null
+                    try {
+                        $moduleItem = (Get-TreeItem -SysManager $sysManager -TreePath ("$treePath^" + $moduleName)).Value
+                    } catch {
+                        $moduleItem = $null
+                    }
+                    if ($null -eq $moduleItem) {
+                        continue
+                    }
+                    $moduleEntry = Convert-TreeItem -TreeItem $moduleItem
+                    $moduleEntry['kind'] = 'module'
+                    $children += $moduleEntry
+                    [void]$listedNames.Add($moduleName)
+                }
             }
 
             Write-JsonResult @{
                 ok = $true
                 data = @{
                     treePath = $treePath
-                    childCount = $count
+                    childCount = $children.Count
                     children = $children
                 }
             }

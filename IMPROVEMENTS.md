@@ -55,6 +55,20 @@ their full `^`-path.
 The rename mechanism itself is fine here; the problem is purely **discoverability**
 via `children`.
 
+### Resolved 2026-06-20 (branch `improve/children-enumerate-modules`)
+`twincat_list_children` now augments the standard `ChildCount`/`Child()` result with
+coupler sub-modules. After building the standard `$children` (each tagged
+`kind:"child"`), it reads `$item.ProduceXml()` (try/catch), parses it (`[xml]`,
+try/catch), selects every `//Module/Name`, and for each module name not already
+listed it resolves `"<boxPath>^<moduleName>"` via `Get-TreeItem` (try/catch). Only
+genuinely-resolvable modules are emitted — `Convert-TreeItem`'d to the same shape as a
+normal child, tagged `kind:"module"`, and appended. Dedupe is a case-sensitive
+(`Ordinal`) `HashSet[string]` of listed names. `childCount` in the response now equals
+`$children.Count` (standard + modules). Every step is guarded so a malformed box or an
+unresolvable module never breaks a normal `children` call. No `index.js` change needed
+(the `children` case flows straight through `textResult`, so `kind` passes through).
+Improvement idea #1 above is now implemented; #2 (`hasUnlistedModules` hint) is moot.
+
 ---
 
 ## 2026-06-20 — Renaming IO tree items is a token sink (no `rename`, `set_xml` echoes full XML)
