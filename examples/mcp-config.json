@@ -1,0 +1,12 @@
+{
+  "//": "Drop-in MCP client config for te1000-mcp. Edit the path to point at index.js in your clone.",
+  "mcpServers": {
+    "te1000": {
+      "command": "node",
+      "args": ["C:\\path\\to\\tc1000-MCP-TC-4026\\index.js"],
+      "env": {
+        "//TE1000_PROGID": "TcXaeShell.DTE.17.0 — set only if your XAE Shell ProgID differs"
+      }
+    }
+  }
+}
