@@ -252,8 +252,10 @@ license action is `confirm`-token gated (see "Guards" at the end of this list).
   requires `confirm="ALLOW_CPP_PUBLISH"`. Refuses TISC paths.
 - **`tc_measurement`** — Scope + Analytics (TIAN) (§11). Actions: `scope_create`,
   `scope_add_child`, `scope_rename`, `scope_record`, `analytics_create`,
-  `logger_create`, `logger_delete`, `stream_create`, `stream_delete`,
-  `node_get_xml`, `node_set_xml`. `scope_record state:"start"` (live acquisition
+  `logger_create`, `logger_delete`, `stream_create`, `stream_delete`. For raw
+  `ProduceXml`/`ConsumeXml` on a TIAN logger/stream node, use `tc_tree get_xml`/
+  `set_xml` (the former `node_get_xml`/`node_set_xml` aliases were removed as
+  redundant). `scope_record state:"start"` (live acquisition
   against the running target) requires `confirm="ALLOW_MEASUREMENT_RECORD"`;
   `logger_delete` / `stream_delete` require `dryRun:true` or
   `confirm="ALLOW_TWINCAT_DELETE"`.
