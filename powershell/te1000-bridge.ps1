@@ -839,7 +839,10 @@ public static class Te1000PlcProjectHelper {
         ((ITcPlcIECProject)iecProject).PlcOpenExport(file, selection);
     }
     public static void PlcOpenImport(object iecProject, string file, int options, string selection, bool folderStructure) {
-        ((ITcPlcIECProject)iecProject).PlcOpenImport(file, (PlcImportOptions)options, selection, folderStructure);
+        // Installed interop: ITcPlcIECProject.PlcOpenImport(string, Int32, string, bool).
+        // The options parameter is a plain Int32 (PLCIMPORTOPTIONS enum: 0 NONE/1 REPLACE/2 RENAME/3 SKIP),
+        // NOT a 'PlcImportOptions' type (that name does not exist in this TCatSysManagerLib build).
+        ((ITcPlcIECProject)iecProject).PlcOpenImport(file, options, selection, folderStructure);
     }
     public static void SaveAsLibrary(object iecProject, string file, bool install) {
         ((ITcPlcIECProject)iecProject).SaveAsLibrary(file, install);
@@ -1116,20 +1119,28 @@ using System;
 using System.Collections.Generic;
 using TCatSysManagerLib;
 public static class Te1000ModuleHelper {
-    // ITcSysManager3.GetModuleManager() -> ITcModuleManager3; enumerate the
-    // ITcModuleInstance2 objects under TIRC^TcCOM Objects. oids are decimal
-    // (XAE displays them in hex). Returns object[] of tuples for the bridge.
+    // GetModuleManager() is on ITcSysManager4+ (NOT on ITcSysManager3 -- it has no
+    // such member on this installed TCatSysManagerLib). It returns ITcModuleManager,
+    // which we QI to ITcModuleManager3 to enumerate the module instances under
+    // TIRC^TcCOM Objects. The enumerator yields ITcModuleInstance2 elements, which
+    // expose ModuleTypeName/ModuleInstanceName/ClassID/oid/ParentOID. There is no
+    // 'ObjectId' member on this build, so objectId is reported as the same value as
+    // oid (XAE merely displays it in hex). oids are decimal. An empty cell (no TcCOM
+    // module instances) yields an empty list, not an error.
     public static object[] List(object sysManager) {
-        ITcSysManager3 sm3 = (ITcSysManager3)sysManager;
-        ITcModuleManager3 mgr = (ITcModuleManager3)sm3.GetModuleManager();
+        ITcSysManager4 sm = (ITcSysManager4)sysManager;
+        ITcModuleManager3 mgr = (ITcModuleManager3)sm.GetModuleManager();
         List<object> list = new List<object>();
-        foreach (ITcModuleInstance2 mi in mgr) {
+        foreach (object o in mgr) {
+            ITcModuleInstance2 mi = o as ITcModuleInstance2;
+            if (mi == null) { continue; }
+            uint oid = mi.oid;
             list.Add(new object[] {
                 mi.ModuleTypeName,
                 mi.ModuleInstanceName,
                 mi.ClassID.ToString(),
-                mi.oid,
-                mi.ObjectId,
+                oid,
+                oid,
                 mi.ParentOID
             });
         }
@@ -1140,7 +1151,8 @@ public static class Te1000ModuleHelper {
     // contextId are DECIMAL oids (XAE displays them in hex). Changes the
     // activated mapping/runtime context -> guarded in index.js.
     public static void SetContext(object moduleInstance, int contextId, int taskObjectId) {
-        ((ITcModuleInstance2)moduleInstance).SetModuleContext(contextId, taskObjectId);
+        // Installed ITcModuleInstance2.SetModuleContext takes (UInt32 contextId, UInt32 taskObjectId).
+        ((ITcModuleInstance2)moduleInstance).SetModuleContext((uint)contextId, (uint)taskObjectId);
     }
 }
 '@
@@ -1293,10 +1305,19 @@ public static class Te1000PlcLibraryHelper {
             ITcPlcLibrary lib = r as ITcPlcLibrary;
             if (ph != null) {
                 kind = "placeholder";
-                try { displayName = ph.DisplayName; } catch {}
-                try { distributor = ph.Distributor; } catch {}
+                // Installed ITcPlcPlaceholderRef only exposes Name / PlaceholderName /
+                // CurrentLibrary / EffectiveResolution. DisplayName, Distributor and
+                // Version are NOT on the placeholder ref itself -- derive them from the
+                // resolved ITcPlcLibrary (EffectiveResolution preferred, else CurrentLibrary).
                 try { if (name == null) name = ph.Name; } catch {}
-                try { version = ph.Version; } catch {}
+                ITcPlcLibrary res = null;
+                try { res = ph.EffectiveResolution; } catch {}
+                if (res == null) { try { res = ph.CurrentLibrary; } catch {} }
+                if (res != null) {
+                    try { displayName = res.DisplayName; } catch {}
+                    try { distributor = res.Distributor; } catch {}
+                    try { version = res.Version; } catch {}
+                }
             } else if (lib != null) {
                 kind = "library";
                 try { displayName = lib.DisplayName; } catch {}
@@ -5113,26 +5134,56 @@ try {
                 $plcPath = "TIPC^$([string]$tipc.Child(1).Name)"
             }
             $root = (Get-TreeItem -SysManager $sysManager -TreePath $plcPath).Value
-            # The nested IEC project (project instance node) is the first child of the
-            # PLC root and is what implements ITcPlcIECProject2 / CheckAllObjects.
-            $node = $root
-            $instancePath = $plcPath
-            if ((Get-TreeItemChildCount -TreeItem $root) -ge 1) {
-                $childNode = (Get-TreeItemChild -TreeItem $root -Index 1).Value
+            # CheckAllObjects lives on ITcPlcIECProject2, which is implemented by the
+            # nested IEC PROJECT node (e.g. 'Cabsort Lite Project') -- NOT the TcCOM
+            # project INSTANCE node ('Cabsort Lite Instance'). The instance node is what
+            # tree-child enumeration surfaces under the PLC root, but it does NOT QI to
+            # ITcPlcIECProject2 (E_NOINTERFACE). The IEC project node is reachable by
+            # name via LookupTreeItem at '<plcPath>^<rootName> Project'. Resolve it the
+            # same way plc_project_check does -- a direct LookupTreeItem + a single
+            # Te1000PlcProjectHelper::CheckAll on the freshly resolved RCW (looping over
+            # cached RCWs stored in a collection was observed to QI-fail E_NOINTERFACE).
+            if (-not (Ensure-TcPlcProjectHelper)) {
+                throw 'typed PLC cast unavailable on this shell (TCatSysManagerLib.dll / Te1000PlcProjectHelper could not be loaded)'
+            }
+            $rootName = Normalize-ScalarValue (Get-SafeValue { [string]$root.Name })
+
+            # Build the ordered list of candidate tree PATHS (strings, not cached RCWs).
+            $candidatePaths = New-Object System.Collections.ArrayList
+            if (-not [string]::IsNullOrWhiteSpace($rootName)) {
+                [void]$candidatePaths.Add("$plcPath^$rootName Project")
+            }
+            $childCount = Get-TreeItemChildCount -TreeItem $root
+            for ($ci = 1; $ci -le $childCount; $ci++) {
+                $childNode = (Get-SafeValue { (Get-TreeItemChild -TreeItem $root -Index $ci).Value })
                 if ($null -ne $childNode) {
-                    $node = $childNode
                     $cn = Normalize-ScalarValue (Get-SafeValue { [string]$childNode.Name })
-                    if (-not [string]::IsNullOrWhiteSpace($cn)) { $instancePath = "$plcPath^$cn" }
+                    if (-not [string]::IsNullOrWhiteSpace($cn)) {
+                        $cp = "$plcPath^$cn"
+                        if (-not $candidatePaths.Contains($cp)) { [void]$candidatePaths.Add($cp) }
+                    }
                 }
             }
-            if (-not (Ensure-TcPlcPouHelper)) {
-                throw 'typed PLC cast unavailable on this shell (TCatSysManagerLib.dll / Te1000PlcPouHelper could not be loaded)'
-            }
+            if (-not $candidatePaths.Contains($plcPath)) { [void]$candidatePaths.Add($plcPath) }
+
             $valid = $null
-            try {
-                $valid = [Te1000PlcPouHelper]::CheckAllObjects($node)
-            } catch {
-                throw "node '$instancePath' does not implement ITcPlcIECProject2 (expected the nested IEC project instance under '$plcPath'): $($_.Exception.Message)"
+            $instancePath = $plcPath
+            $lastErr = $null
+            $resolved = $false
+            foreach ($candPath in $candidatePaths) {
+                try {
+                    # Resolve a FRESH RCW per attempt (mirrors plc_project_check exactly).
+                    $node = (Get-TreeItem -SysManager $sysManager -TreePath $candPath).Value
+                    $valid = [Te1000PlcProjectHelper]::CheckAll($node)
+                    $instancePath = $candPath
+                    $resolved = $true
+                    break
+                } catch {
+                    $lastErr = $_.Exception.Message
+                }
+            }
+            if (-not $resolved) {
+                throw "could not find a node implementing ITcPlcIECProject2 (CheckAllObjects) under '$plcPath'. Tried the '<name> Project' instance node and the PLC root's children. Last error: $lastErr"
             }
 
             Write-JsonResult @{
