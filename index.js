@@ -26,6 +26,7 @@ const PLC_DOWNLOAD_CONFIRMATION = "ALLOW_PLC_DOWNLOAD";
 const PLC_LIBRARY_REPO_CONFIRMATION = "ALLOW_PLC_LIBRARY_REPO";
 const ROUTE_WRITE_CONFIRMATION = "ALLOW_TWINCAT_ROUTE_WRITE";
 const MODULE_CONTEXT_CONFIRMATION = "ALLOW_TWINCAT_MODULE_CONTEXT";
+const CPP_PUBLISH_CONFIRMATION = "ALLOW_CPP_PUBLISH";
 
 // --- Modal-dialog watchdog -------------------------------------------------
 // A bridge COM call into XAE blocks until any modal dialog it raises is
@@ -1274,6 +1275,69 @@ server.registerTool(
         }
         need(p, ["path", "taskObjectId"], p.action);
         return textResult(await bridgeCall("twincat_module_set_context", { path: p.path, taskObjectId: p.taskObjectId, contextId: p.contextId }));
+    }
+  },
+);
+
+server.registerTool(
+  "tc_cpp",
+  {
+    description:
+      "TwinCAT C++ projects/modules under TIXC (paths use ^ separators). C++ ONLY — nothing here targets TISC/safety, and nothing activates/downloads/touches the runtime (those stay the existing guarded tools). VS-hosted-safe: create/open go purely through ITcSmTreeItem.CreateChild on TIXC (no New/Open/SaveConfiguration). Actions: " +
+      "create_project (name, template, before?) — CreateChild a new C++ project node under TIXC from a wizard; template = \"TwinCAT C++ Project Wizard\" | \"TcVersionedDriverWizard\" | \"TcModuleCyclicCallerWizard\" (or a full template .vcxproj/.tczip path — if a wizard NAME is rejected, fall back to the file path). " +
+      "create_module (projectPath = TIXC^<proj>, name, template? default \"TwinCAT Class Wizard\", before?) — CreateChild a module/class on an existing C++ project. " +
+      "open (file = existing .vcxproj/.tczip, subType? 0 copy into solution dir (default) /1 move/2 use-in-place, before?) — import an existing C++ project; the project is NOT renamed (CreateChild name is empty). " +
+      "tmc_codegen (projectPath) — offline StartTmcCodeGenerator (regenerates C++ from the .tmc; no runtime impact). " +
+      "set_props (projectPath, bootProjectEncryption? None|Target, saveProjectSources?) — offline config edit via ConsumeXml (at least one prop required). " +
+      "build (projectName = the .vcxproj DTE project Name/UniqueName, config? default \"Release|TwinCAT RT (x64)\", waitForFinish? default true, timeoutMs? default 1800000) — compile a single C++ project via SolutionBuild2.BuildProject; compiles only, does NOT deploy. " +
+      "publish (projectPath, confirm) — GUARDED, requires confirm=\"" + CPP_PUBLISH_CONFIRMATION + "\" and defaults to no-op: builds the module for ALL platforms and exports the deployable/shippable driver artifacts (long-running); does NOT itself activate/restart the runtime. " +
+      "CAVEAT: the ConsumeXml wrapper element for C++ project params is from a doc summary (Set-TreeItemXml surfaces GetLastXmlError, so a wrong element fails loudly); ProduceXml the project node once to confirm element names before relying on tmc_codegen/set_props/publish.",
+    inputSchema: {
+      action: z.enum(["create_project", "create_module", "open", "tmc_codegen", "set_props", "build", "publish"]),
+      name: z.string().optional(),
+      template: z.string().optional(),
+      projectPath: z.string().optional(),
+      file: z.string().optional(),
+      subType: z.number().int().min(0).max(2).optional(),
+      before: z.string().optional().describe("insert before this sibling"),
+      bootProjectEncryption: z.enum(["None", "Target"]).optional(),
+      saveProjectSources: z.boolean().optional(),
+      projectName: z.string().optional(),
+      config: z.string().optional(),
+      waitForFinish: z.boolean().optional(),
+      timeoutMs: z.number().int().positive().max(3600000).optional(),
+      confirm: z.string().optional(),
+    },
+  },
+  async (p) => {
+    switch (p.action) {
+      case "create_project":
+        need(p, ["name", "template"], p.action);
+        return textResult(await bridgeCall("twincat_cpp_create_project", { name: p.name, template: p.template, before: p.before }));
+      case "create_module":
+        need(p, ["projectPath", "name"], p.action);
+        return textResult(await bridgeCall("twincat_cpp_create_module", { projectPath: p.projectPath, name: p.name, template: p.template, before: p.before }));
+      case "open":
+        need(p, ["file"], p.action);
+        return textResult(await bridgeCall("twincat_cpp_open", { file: p.file, subType: p.subType, before: p.before }));
+      case "tmc_codegen":
+        need(p, ["projectPath"], p.action);
+        return textResult(await bridgeCall("twincat_cpp_consume_xml", { projectPath: p.projectPath }));
+      case "set_props":
+        need(p, ["projectPath"], p.action);
+        if (p.bootProjectEncryption === undefined && p.saveProjectSources === undefined) {
+          throw new Error("set_props needs at least one of bootProjectEncryption / saveProjectSources.");
+        }
+        return textResult(await bridgeCall("twincat_cpp_set_props", { projectPath: p.projectPath, bootProjectEncryption: p.bootProjectEncryption, saveProjectSources: p.saveProjectSources }));
+      case "build":
+        need(p, ["projectName"], p.action);
+        return textResult(await bridgeCall("twincat_cpp_build_project", { projectName: p.projectName, config: p.config, waitForFinish: p.waitForFinish, timeoutMs: p.timeoutMs }));
+      case "publish":
+        need(p, ["projectPath"], p.action);
+        if (p.confirm !== CPP_PUBLISH_CONFIRMATION) {
+          throw new Error('Blocked. publish builds the C++ module for ALL platforms and exports deployable driver artifacts. Re-run with confirm="' + CPP_PUBLISH_CONFIRMATION + '" to proceed.');
+        }
+        return textResult(await bridgeCall("twincat_cpp_publish", { projectPath: p.projectPath, confirm: p.confirm }));
     }
   },
 );

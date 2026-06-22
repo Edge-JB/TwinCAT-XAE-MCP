@@ -6904,6 +6904,218 @@ try {
             exit 0
         }
 
+        'twincat_cpp_create_project' {
+            $parentPath = 'TIXC'
+            $name = [string]$payload.name
+            $template = [string]$payload.template
+            if ([string]::IsNullOrWhiteSpace($name)) { throw 'name is required' }
+            if ([string]::IsNullOrWhiteSpace($template)) { throw 'template is required' }
+            $before = if ($payload.PSObject.Properties.Name -contains 'before' -and $payload.before) { [string]$payload.before } else { '' }
+
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+            $cpp = (Get-TreeItem -SysManager $sysManager -TreePath $parentPath).Value
+            $child = $cpp.CreateChild($name, 0, $before, $template)
+            Assert-WellFormedChild -Parent $cpp -Child $child -RequestedName $name -SubType 0 -ParentPath $parentPath
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    parentPath = $parentPath
+                    child = Convert-TreeItem -TreeItem $child
+                }
+            }
+            exit 0
+        }
+
+        'twincat_cpp_create_module' {
+            $parentPath = [string]$payload.projectPath
+            $name = [string]$payload.name
+            if ([string]::IsNullOrWhiteSpace($parentPath)) { throw 'projectPath is required' }
+            if ([string]::IsNullOrWhiteSpace($name)) { throw 'name is required' }
+            Assert-NotSafetyPath -Path $parentPath
+            $template = if ($payload.PSObject.Properties.Name -contains 'template' -and -not [string]::IsNullOrWhiteSpace([string]$payload.template)) { [string]$payload.template } else { 'TwinCAT Class Wizard' }
+            $before = if ($payload.PSObject.Properties.Name -contains 'before' -and $payload.before) { [string]$payload.before } else { '' }
+
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+            $proj = (Get-TreeItem -SysManager $sysManager -TreePath $parentPath).Value
+            $child = $proj.CreateChild($name, 0, $before, $template)
+            Assert-WellFormedChild -Parent $proj -Child $child -RequestedName $name -SubType 0 -ParentPath $parentPath
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    parentPath = $parentPath
+                    child = Convert-TreeItem -TreeItem $child
+                }
+            }
+            exit 0
+        }
+
+        'twincat_cpp_open' {
+            $file = [string]$payload.file
+            if ([string]::IsNullOrWhiteSpace($file)) { throw 'file is required' }
+            if (-not (Test-Path -LiteralPath $file)) { throw "C++ project file not found: $file" }
+            $subType = if ($null -ne $payload.subType) { [int]$payload.subType } else { 0 }
+            if ($subType -notin 0, 1, 2) { throw 'subType must be 0, 1, or 2' }
+            $before = if ($payload.PSObject.Properties.Name -contains 'before' -and $payload.before) { [string]$payload.before } else { '' }
+
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+            $cpp = (Get-TreeItem -SysManager $sysManager -TreePath 'TIXC').Value
+            # NOTE: name MUST be '' — C++ projects cannot be renamed on open, so
+            # Assert-WellFormedChild (which requires a matching requested name) is
+            # intentionally bypassed; a manual non-null/non-blank check replaces it.
+            $child = $cpp.CreateChild('', $subType, $before, $file)
+            if ($null -eq $child) { throw 'CreateChild returned null opening C++ project' }
+            $actualName = Get-SafeValue { [string]$child.Name }
+            if ([string]::IsNullOrWhiteSpace([string]$actualName)) {
+                throw "open produced a ghost (blank name) — check the .vcxproj/.tczip path and subType ($file, subType=$subType)"
+            }
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    parentPath = 'TIXC'
+                    file = $file
+                    subType = $subType
+                    child = Convert-TreeItem -TreeItem $child
+                }
+            }
+            exit 0
+        }
+
+        'twincat_cpp_consume_xml' {
+            $projectPath = [string]$payload.projectPath
+            if ([string]::IsNullOrWhiteSpace($projectPath)) { throw 'projectPath is required' }
+            Assert-NotSafetyPath -Path $projectPath
+
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+            $xml = '<TreeItem><CppProjectDef><StartTmcCodeGenerator><Active>true</Active></StartTmcCodeGenerator></CppProjectDef></TreeItem>'
+            $null = Set-TreeItemXml -SysManager $sysManager -TargetPath $projectPath -Xml $xml
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    projectPath = $projectPath
+                    tmcCodeGenerated = $true
+                }
+            }
+            exit 0
+        }
+
+        'twincat_cpp_set_props' {
+            $projectPath = [string]$payload.projectPath
+            if ([string]::IsNullOrWhiteSpace($projectPath)) { throw 'projectPath is required' }
+            Assert-NotSafetyPath -Path $projectPath
+
+            $inner = ''
+            if ($payload.PSObject.Properties.Name -contains 'bootProjectEncryption' -and -not [string]::IsNullOrWhiteSpace([string]$payload.bootProjectEncryption)) {
+                $v = [string]$payload.bootProjectEncryption
+                if ($v -notin 'None', 'Target') { throw 'bootProjectEncryption must be None or Target' }
+                $inner += "<BootProjectEncryption>$v</BootProjectEncryption>"
+            }
+            if ($payload.PSObject.Properties.Name -contains 'saveProjectSources' -and $null -ne $payload.saveProjectSources) {
+                $b = ([bool]$payload.saveProjectSources).ToString().ToLower()
+                $inner += "<TargetArchiveSettings><SaveProjectSources>$b</SaveProjectSources></TargetArchiveSettings><FileArchiveSettings><SaveProjectSources>$b</SaveProjectSources></FileArchiveSettings>"
+            }
+            if ([string]::IsNullOrEmpty($inner)) {
+                throw 'set_props needs at least one of bootProjectEncryption / saveProjectSources'
+            }
+
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+            $xml = "<TreeItem><CppProjectDef>$inner</CppProjectDef></TreeItem>"
+            $null = Set-TreeItemXml -SysManager $sysManager -TargetPath $projectPath -Xml $xml
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    projectPath = $projectPath
+                    propsApplied = $true
+                }
+            }
+            exit 0
+        }
+
+        'twincat_cpp_build_project' {
+            $projectName = [string]$payload.projectName
+            if ([string]::IsNullOrWhiteSpace($projectName)) { throw 'projectName is required' }
+            $config = if ($payload.PSObject.Properties.Name -contains 'config' -and -not [string]::IsNullOrWhiteSpace([string]$payload.config)) { [string]$payload.config } else { 'Release|TwinCAT RT (x64)' }
+            $wait = if ($null -ne $payload.waitForFinish) { [bool]$payload.waitForFinish } else { $true }
+            $timeoutMs = if ($null -ne $payload.timeoutMs) { [int]$payload.timeoutMs } else { 1800000 }
+
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $solution = Get-SolutionInfo -Dte $dte
+            if (-not $solution.isOpen) { throw 'No solution is open in XAE' }
+
+            # BuildProject wants the project UniqueName, not the display name; resolve
+            # it by scanning Solution.Projects.
+            $unique = $null
+            $projects = $dte.Solution.Projects
+            for ($i = 1; $i -le $projects.Count; $i++) {
+                $proj = $projects.Item($i)
+                if ($null -eq $proj) { continue }
+                $pName = Get-SafeValue { [string]$proj.Name }
+                $pUnique = Get-SafeValue { [string]$proj.UniqueName }
+                if ($pName -eq $projectName -or $pUnique -eq $projectName) {
+                    $unique = if (-not [string]::IsNullOrWhiteSpace([string]$pUnique)) { [string]$pUnique } else { [string]$pName }
+                    break
+                }
+            }
+            if ([string]::IsNullOrWhiteSpace($unique)) { throw "C++ project not found in solution: $projectName" }
+
+            $solutionBuild = $dte.Solution.SolutionBuild
+            $solutionBuild.BuildProject($config, $unique, $wait)
+
+            if ($wait) {
+                $build = Wait-ForBuildFinish -SolutionBuild $solutionBuild -TimeoutMs $timeoutMs
+            } else {
+                $build = @{
+                    buildState = [int]$solutionBuild.BuildState
+                    lastBuildInfo = Get-SafeValue { [int]$solutionBuild.LastBuildInfo }
+                }
+            }
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    projectName = $projectName
+                    uniqueName = $unique
+                    config = $config
+                    waited = $wait
+                    build = $build
+                }
+            }
+            exit 0
+        }
+
+        'twincat_cpp_publish' {
+            # Confirm token is enforced in index.js before bridgeCall (matching
+            # twincat_activate_configuration, which receives confirm but does not
+            # re-verify here).
+            $projectPath = [string]$payload.projectPath
+            if ([string]::IsNullOrWhiteSpace($projectPath)) { throw 'projectPath is required' }
+            Assert-NotSafetyPath -Path $projectPath
+
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+            $xml = '<TreeItem><CppProjectDef><PublishModules><Active>true</Active></PublishModules></CppProjectDef></TreeItem>'
+            $null = Set-TreeItemXml -SysManager $sysManager -TargetPath $projectPath -Xml $xml
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    projectPath = $projectPath
+                    published = $true
+                    note = 'Modules built for all platforms and exported. Does not activate/restart the runtime.'
+                }
+            }
+            exit 0
+        }
+
         default {
             throw "Unsupported action: $Action"
         }
