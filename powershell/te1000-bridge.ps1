@@ -1206,7 +1206,7 @@ function Resolve-PlcTaskRefCandidates {
     }
     $rootChildCount = Get-TreeItemChildCount -TreeItem $root
     for ($ri = 1; $ri -le $rootChildCount; $ri++) {
-        $rc = (Get-SafeValue { (Get-TreeItemChild -TreeItem $root -Index $ri).Value })
+        $rc = (Get-TreeItemChild -TreeItem $root -Index $ri).Value
         if ($null -ne $rc) {
             $rcn = Normalize-ScalarValue (Get-SafeValue { [string]$rc.Name })
             if (-not [string]::IsNullOrWhiteSpace($rcn)) {
@@ -1227,7 +1227,7 @@ function Resolve-PlcTaskRefCandidates {
         # NAME-PATH later; here we only collect the child names.
         $childCount = Get-TreeItemChildCount -TreeItem $projNode
         for ($ci = 1; $ci -le $childCount; $ci++) {
-            $childNode = (Get-SafeValue { (Get-TreeItemChild -TreeItem $projNode -Index $ci).Value })
+            $childNode = (Get-TreeItemChild -TreeItem $projNode -Index $ci).Value
             if ($null -eq $childNode) { continue }
             $cn = Normalize-ScalarValue (Get-SafeValue { [string]$childNode.Name })
             if ([string]::IsNullOrWhiteSpace($cn)) { continue }
@@ -1634,10 +1634,13 @@ function Assert-PlcMoveLegal {
 
 function New-PlcTempExportPath {
     # Build a unique temp file path for the ExportChild/ImportChild round-trip.
-    # Object export uses a .tpzip archive (per features.md 7.1); the path is
+    # An INDIVIDUAL PLC object (POU/FB/folder/etc.) exports via ITcSmTreeItem.ExportChild
+    # to a plain '.zip' archive -- NOT '.tpzip'. ('.tpzip' is the PROJECT-level archive
+    # used by twincat_save_plc_archive on the TIPC project node; ExportChild on a sub-node
+    # rejects it with "doesn't specify a zip archive!" / E_INVALIDARG.) The path is
     # returned so the import and the finally{} cleanup share the same file.
-    param([string]$Extension = '.tpzip')
-    $ext = if ([string]::IsNullOrWhiteSpace($Extension)) { '.tpzip' } else { $Extension }
+    param([string]$Extension = '.zip')
+    $ext = if ([string]::IsNullOrWhiteSpace($Extension)) { '.zip' } else { $Extension }
     if (-not $ext.StartsWith('.')) { $ext = '.' + $ext }
     $name = 'te1000-plcmove-' + ([guid]::NewGuid().ToString('N')) + $ext
     return [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), $name)
@@ -1774,7 +1777,7 @@ function Find-MatchesInText {
         [AllowNull()][string]$Text,
         [Parameter(Mandatory = $true)][string]$Pattern,
         [Parameter(Mandatory = $true)][ValidateSet('decl','impl')][string]$Section,
-        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Path,
         [bool]$IgnoreCase = $false
     )
     if ([string]::IsNullOrEmpty($Text)) { return @() }
@@ -2218,7 +2221,7 @@ function Get-PlcProjectNodePath {
     }
     $childCount = Get-TreeItemChildCount -TreeItem $root
     for ($ci = 1; $ci -le $childCount; $ci++) {
-        $childNode = (Get-SafeValue { (Get-TreeItemChild -TreeItem $root -Index $ci).Value })
+        $childNode = (Get-TreeItemChild -TreeItem $root -Index $ci).Value
         if ($null -ne $childNode) {
             $cn = Normalize-ScalarValue (Get-SafeValue { [string]$childNode.Name })
             if (-not [string]::IsNullOrWhiteSpace($cn)) {
@@ -2271,7 +2274,10 @@ function Invoke-PlcTreeWalk {
     $type = Get-PlcObjectTypeName -ItemType $info.itemType -ItemSubType $info.subType `
         -ItemSubTypeName $subTypeName -Name $info.name -ChildCount $childCount
 
-    $node = @{
+    # NOTE: use $result (NOT $node) for the output hashtable -- PowerShell variable
+    # names are case-INSENSITIVE, so a local '$node' would clobber the '$Node' COM
+    # tree-item parameter and break the child recursion below.
+    $result = @{
         path = $BasePath
         name = $info.name
         type = $type
@@ -2279,16 +2285,20 @@ function Invoke-PlcTreeWalk {
         subType = $info.subType
         childCount = $childCount
     }
-    if (-not [string]::IsNullOrWhiteSpace($subTypeName)) { $node.subTypeName = $subTypeName }
+    if (-not [string]::IsNullOrWhiteSpace($subTypeName)) { $result.subTypeName = $subTypeName }
 
     if ($childCount -gt 0) {
-        if (($MaxDepth -gt 0) -and ($Depth -ge $MaxDepth)) {
+        # Depth semantics: depth N => emit N levels of children below the start node.
+        # The start node is Depth 1; its direct children are Depth 2. Emit a node's
+        # children while Depth <= MaxDepth (so MaxDepth=1 still lists direct children);
+        # stop one level deeper. MaxDepth 0 = unlimited.
+        if (($MaxDepth -gt 0) -and ($Depth -gt $MaxDepth)) {
             # Stopped by depth but children remain.
-            $node.truncated = $true
+            $result.truncated = $true
         } else {
             $children = @()
             for ($i = 1; $i -le $childCount; $i++) {
-                $childNode = (Get-SafeValue { (Get-TreeItemChild -TreeItem $Node -Index $i).Value })
+                $childNode = (Get-TreeItemChild -TreeItem $Node -Index $i).Value
                 if ($null -eq $childNode) { continue }
                 $childName = Normalize-ScalarValue (Get-SafeValue { [string]$childNode.Name })
                 if ([string]::IsNullOrWhiteSpace($childName)) { continue }
@@ -2296,10 +2306,10 @@ function Invoke-PlcTreeWalk {
                 $children += Invoke-PlcTreeWalk -SysManager $SysManager -Node $childNode `
                     -BasePath $childPath -Depth ($Depth + 1) -MaxDepth $MaxDepth
             }
-            if (@($children).Count -gt 0) { $node.children = @($children) }
+            if (@($children).Count -gt 0) { $result.children = @($children) }
         }
     }
-    return $node
+    return $result
 }
 
 function Get-PlcCodeObjects {
@@ -2326,7 +2336,7 @@ function Get-PlcCodeObjects {
     }
     $childCount = Get-TreeItemChildCount -TreeItem $RootItem
     for ($i = 1; $i -le $childCount; $i++) {
-        $childNode = (Get-SafeValue { (Get-TreeItemChild -TreeItem $RootItem -Index $i).Value })
+        $childNode = (Get-TreeItemChild -TreeItem $RootItem -Index $i).Value
         if ($null -eq $childNode) { continue }
         $childName = Normalize-ScalarValue (Get-SafeValue { [string]$childNode.Name })
         if ([string]::IsNullOrWhiteSpace($childName)) { continue }
@@ -2561,7 +2571,7 @@ function Add-ValidateResult {
         if (-not [string]::IsNullOrWhiteSpace($rootName)) { [void]$candidatePaths.Add("$plcPath^$rootName Project") }
         $childCount = Get-TreeItemChildCount -TreeItem $root
         for ($ci = 1; $ci -le $childCount; $ci++) {
-            $childNode = (Get-SafeValue { (Get-TreeItemChild -TreeItem $root -Index $ci).Value })
+            $childNode = (Get-TreeItemChild -TreeItem $root -Index $ci).Value
             if ($null -ne $childNode) {
                 $cn = Normalize-ScalarValue (Get-SafeValue { [string]$childNode.Name })
                 if (-not [string]::IsNullOrWhiteSpace($cn)) {
@@ -2687,7 +2697,11 @@ function Invoke-PlcPouCreate {
 
     $child = $parentItem.CreateChild($name, $subType, $before, $vInfo)
     Assert-WellFormedChild -Parent $parentItem -Child $child -RequestedName $name -SubType $subType -ParentPath $parent
-    return $child
+    # Return via [ref] + -NoEnumerate: a freshly-created object with zero children is
+    # an empty COM enumerable, and a bare 'return $child' would let the pipeline
+    # enumerate it to nothing ($null). Callers unwrap with .Value.
+    Write-Output -NoEnumerate ([ref]$child)
+    return
 }
 
 function Invoke-PlcPouCreateFolder {
@@ -2712,7 +2726,10 @@ function Invoke-PlcPouCreateFolder {
     $parentItem = (Get-TreeItem -SysManager $SysManager -TreePath $parent).Value
     $child = $parentItem.CreateChild($name, 601, $before, $null)
     Assert-WellFormedChild -Parent $parentItem -Child $child -RequestedName $name -SubType 601 -ParentPath $parent
-    return $child
+    # See Invoke-PlcPouCreate: a new empty folder is an empty COM enumerable; return
+    # via [ref] so the pipeline does not enumerate it to $null. Callers unwrap .Value.
+    Write-Output -NoEnumerate ([ref]$child)
+    return
 }
 
 function Expand-UIHierarchyChildren {
@@ -3041,9 +3058,14 @@ function Invoke-PlcObjectRename {
 function Invoke-PlcObjectMove {
     # COM. Reparent one PLC object while preserving it (decl/impl/document/sub-
     # objects). There is no native ITcSmTreeItem reparent in the installed interop,
-    # so this is export-to-temp + import-under-newParent + delete-original, all in
-    # ONE attach. On import/verify failure the original is left intact (never
-    # deleted). The temp file is removed by the caller's finally{} via $TempPath.
+    # so this is export-to-temp (.zip) + delete-original + import-under-newParent,
+    # all in ONE attach. The original MUST be deleted before the import: PLC POUs
+    # share ONE global namespace, so importing a copy while the original still exists
+    # makes TwinCAT auto-rename the import (e.g. 'FB_x' -> 'FB_x_1'). The exported .zip
+    # is a recoverable backup -- if the import/verify fails after the delete, the
+    # original is re-imported under the OLD parent (auto-recovery, no data lost); if
+    # even that fails, the backup archive is preserved and its path is reported. The
+    # temp file is removed by the caller's finally{} via $TempPath.
     param(
         $SysManager,
         [string]$Path,
@@ -3061,40 +3083,55 @@ function Invoke-PlcObjectMove {
     $newParentItem = (Get-TreeItem -SysManager $SysManager -TreePath $NewParent).Value
     $beforeName = if ([string]::IsNullOrWhiteSpace($Before)) { '' } else { [string]$Before }
 
-    # 1) Export the object from its old parent to the temp archive.
+    # 1) Export the object to the temp .zip (a recoverable backup of decl/impl/subobjects).
     $oldParent.ExportChild($split.name, $TempPath)
 
-    # 2) Import it under the new parent (bReconnect = $true re-links by name).
-    $imported = $null
-    try {
-        $imported = $newParentItem.ImportChild($TempPath, $beforeName, $true, '')
-    } catch {
-        # Original is untouched; surface the import failure.
-        throw "ImportChild of '$($split.name)' under '$NewParent' failed: $($_.Exception.Message). The original object at '$Path' was left intact."
-    }
-
-    # 3) Verify the imported child exists under the new parent.
-    $verified = $null
-    try {
-        $verified = (Get-ChildTreeItemByName -ParentItem $newParentItem -ChildName $split.name).Value
-    } catch {
-        $verified = $null
-    }
-    if ($null -eq $verified) {
-        throw "Move verification failed: '$($split.name)' was not found under '$NewParent' after ImportChild. The original object at '$Path' was left intact."
-    }
-    $newPath = Normalize-ScalarValue (Get-SafeValue { [string]$verified.PathName })
-
-    # 4) Delete the original ONLY after a verified import.
+    # 2) Delete the original FIRST so the import keeps the exact name (global namespace).
     try {
         $oldParent.DeleteChild($split.name)
     } catch {
-        # Edge case (9): object now exists in BOTH places. Report so the caller
-        # can clean up, rather than silently leaving a duplicate.
-        throw "Move partially completed: '$($split.name)' was imported under '$NewParent' (now at '$newPath') but DeleteChild of the original under '$($split.parent)' failed: $($_.Exception.Message). The object now exists in BOTH '$Path' and '$newPath' - remove one manually."
+        throw "Move aborted: could not delete the original '$($split.name)' under '$($split.parent)': $($_.Exception.Message). Nothing was moved; the original is intact."
     }
 
-    return $newPath
+    # 3) Import under the new parent. With the original gone there is no name/GUID
+    #    collision, so it imports under its original name.
+    $importErr = $null
+    try {
+        [void]$newParentItem.ImportChild($TempPath, $beforeName, $true, '')
+    } catch {
+        $importErr = $_.Exception.Message
+    }
+
+    # 4) Verify by name-path (LookupTreeItem is reliable for zero-child objects).
+    $newPath = "$NewParent^$($split.name)"
+    $verified = $null
+    if ($null -eq $importErr) {
+        try { $verified = (Get-TreeItem -SysManager $SysManager -TreePath $newPath).Value } catch { $verified = $null }
+    }
+
+    if ($null -eq $verified) {
+        # Import/verify failed AFTER the delete. Re-import the backup under the OLD
+        # parent to restore the original so no work is lost.
+        $recovered = $false
+        try {
+            [void]$oldParent.ImportChild($TempPath, '', $true, '')
+            $restored = $null
+            try { $restored = (Get-TreeItem -SysManager $SysManager -TreePath $Path).Value } catch { $restored = $null }
+            if ($null -ne $restored) { $recovered = $true }
+        } catch { $recovered = $false }
+
+        $detail = if ($importErr) { " (import error: $importErr)" } else { " (object not found under the new parent after import)" }
+        if ($recovered) {
+            throw "Move failed but the original was RESTORED at '$Path' (no data lost)$detail."
+        }
+
+        # Total failure: preserve the backup archive so the object can be restored manually.
+        $preserved = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), ("te1000-plcmove-RECOVER-" + $split.name + "-" + [System.IO.Path]::GetFileName($TempPath)))
+        try { Copy-Item -LiteralPath $TempPath -Destination $preserved -Force -ErrorAction Stop } catch { $preserved = $TempPath }
+        throw "Move FAILED and the original could not be auto-restored. '$($split.name)' was exported to a recovery archive at '$preserved' -- import it manually (right-click the parent -> Import) to restore$detail."
+    }
+
+    return (Normalize-ScalarValue (Get-SafeValue { [string]$verified.PathName }))
 }
 
 function Assert-WellFormedChild {
@@ -5902,7 +5939,7 @@ try {
             # Offline engineering edit: CreateChild a PLC object (POU/DUT/GVL/etc).
             $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
             $sysManager = (Get-SysManager -Dte $dte).Value
-            $child = Invoke-PlcPouCreate -SysManager $sysManager -Entry $payload
+            $child = (Invoke-PlcPouCreate -SysManager $sysManager -Entry $payload).Value
 
             Write-JsonResult @{
                 ok = $true
@@ -5929,7 +5966,7 @@ try {
                 $p = if ($entry.parent) { [string]$entry.parent } else { '' }
                 $n = if ($entry.name) { [string]$entry.name } else { '' }
                 try {
-                    $child = Invoke-PlcPouCreate -SysManager $sysManager -Entry $entry
+                    $child = (Invoke-PlcPouCreate -SysManager $sysManager -Entry $entry).Value
                     $results += @{ parent = $p; name = $n; ok = $true; child = Convert-TreeItem -TreeItem $child }
                     $succeeded++
                 } catch {
@@ -5958,7 +5995,7 @@ try {
             # Offline engineering edit: CreateChild a PLC folder (subType 601) under parent.
             $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
             $sysManager = (Get-SysManager -Dte $dte).Value
-            $child = Invoke-PlcPouCreateFolder -SysManager $sysManager -Entry $payload
+            $child = (Invoke-PlcPouCreateFolder -SysManager $sysManager -Entry $payload).Value
 
             Write-JsonResult @{
                 ok = $true
@@ -5985,7 +6022,7 @@ try {
                 $p = if ($entry.parent) { [string]$entry.parent } else { '' }
                 $n = if ($entry.name) { [string]$entry.name } else { '' }
                 try {
-                    $child = Invoke-PlcPouCreateFolder -SysManager $sysManager -Entry $entry
+                    $child = (Invoke-PlcPouCreateFolder -SysManager $sysManager -Entry $entry).Value
                     $results += @{ parent = $p; name = $n; ok = $true; child = Convert-TreeItem -TreeItem $child }
                     $succeeded++
                 } catch {
@@ -6077,7 +6114,14 @@ try {
             if (-not (Ensure-TcPlcPouHelper)) {
                 throw 'typed PLC cast unavailable on this shell (TCatSysManagerLib.dll / Te1000PlcPouHelper could not be loaded)'
             }
-            $declText = [Te1000PlcPouHelper]::GetDeclaration($item)
+            $declText = $null
+            try {
+                $declText = [Te1000PlcPouHelper]::GetDeclaration($item)
+            } catch {
+                # Implementation-only objects (Action subType 608, Transition 616) do
+                # not QI to ITcPlcDeclaration -> E_NOINTERFACE. Give an actionable error.
+                throw "get_decl: '$path' has no declaration text (it is an implementation-only object such as an Action or Transition). Use get_impl instead. (underlying: $($_.Exception.Message))"
+            }
 
             $data = Get-PlcTextReadResult -Text $declText -Payload $payload -Path $path
             Write-JsonResult @{ ok = $true; data = $data }
@@ -6130,7 +6174,16 @@ try {
             if (-not (Ensure-TcPlcPouHelper)) {
                 throw 'typed PLC cast unavailable on this shell (TCatSysManagerLib.dll / Te1000PlcPouHelper could not be loaded)'
             }
-            $declText = [Te1000PlcPouHelper]::GetDeclaration($item)
+            # Impl-only objects (Action/Transition) have no declaration; degrade to an
+            # empty decl (E_NOINTERFACE) so outline still reports impl + child code items.
+            $declText = ''
+            $hasDecl = $true
+            try {
+                $declText = [Te1000PlcPouHelper]::GetDeclaration($item)
+            } catch {
+                $declText = ''
+                $hasDecl = $false
+            }
             $declSplit = Split-PlcLines -Text $declText
             $declLines = @($declSplit.lines)
             $outline = Get-DeclOutline -Lines $declLines
@@ -6155,7 +6208,7 @@ try {
             $children = @()
             $childCount = Get-TreeItemChildCount -TreeItem $item
             for ($ci = 1; $ci -le $childCount; $ci++) {
-                $childNode = (Get-SafeValue { (Get-TreeItemChild -TreeItem $item -Index $ci).Value })
+                $childNode = (Get-TreeItemChild -TreeItem $item -Index $ci).Value
                 if ($null -eq $childNode) { continue }
                 $cn = Normalize-ScalarValue (Get-SafeValue { [string]$childNode.Name })
                 if ([string]::IsNullOrWhiteSpace($cn)) { continue }
@@ -6178,6 +6231,7 @@ try {
                 data = @{
                     path = $path
                     objectKind = $objectKind
+                    hasDeclaration = $hasDecl
                     header = $outline.header
                     declLineCount = @($declLines).Count
                     implLineCount = $implLineCount
@@ -6651,7 +6705,7 @@ try {
             }
             $childCount = Get-TreeItemChildCount -TreeItem $root
             for ($ci = 1; $ci -le $childCount; $ci++) {
-                $childNode = (Get-SafeValue { (Get-TreeItemChild -TreeItem $root -Index $ci).Value })
+                $childNode = (Get-TreeItemChild -TreeItem $root -Index $ci).Value
                 if ($null -ne $childNode) {
                     $cn = Normalize-ScalarValue (Get-SafeValue { [string]$childNode.Name })
                     if (-not [string]::IsNullOrWhiteSpace($cn)) {
@@ -6873,15 +6927,13 @@ try {
             $sysManager = (Get-SysManager -Dte $dte).Value
             $parent = (Get-TreeItem -SysManager $sysManager -TreePath $parentPath).Value
 
-            # Verify the child exists before deleting (scan parent children by name).
+            # Verify the child exists before deleting. Resolve it directly by name-path
+            # (LookupTreeItem) rather than scanning $parent.Child(): name-path resolution
+            # is reliable and does NOT collapse empty-enumerable (zero-child) nodes the
+            # way a Get-SafeValue-wrapped Child() fetch does.
+            $childPath = "$parentPath^$childName"
             $childItem = $null
-            $childCount = Get-TreeItemChildCount -TreeItem $parent
-            for ($i = 1; $i -le $childCount; $i++) {
-                $c = (Get-SafeValue { (Get-TreeItemChild -TreeItem $parent -Index $i).Value })
-                if ($null -eq $c) { continue }
-                $cn = Normalize-ScalarValue (Get-SafeValue { [string]$c.Name })
-                if ($cn -eq $childName) { $childItem = $c; break }
-            }
+            try { $childItem = (Get-TreeItem -SysManager $sysManager -TreePath $childPath).Value } catch { $childItem = $null }
             if ($null -eq $childItem) {
                 throw "child '$childName' not found under '$parentPath' (nothing deleted)"
             }
@@ -6978,7 +7030,7 @@ try {
                     newParent = $newParent
                     newPath = $newPath
                     name = $splitInfo.name
-                    via = 'export-import-delete'
+                    via = 'export-delete-import'
                 }
             }
             exit 0

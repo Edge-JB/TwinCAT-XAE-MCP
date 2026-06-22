@@ -5,6 +5,158 @@ on real TwinCAT projects. Newest first.
 
 ---
 
+## 2026-06-22 — FIXED all plc_pou sweep bugs; re-verified live end-to-end on "Cabsort Lite"
+
+Root cause of the whole tree/find/outline/create/delete cluster turned out to be a
+**single PowerShell idiom**, not `.Child()` being broken: `Get-SafeValue { (Get-TreeItemChild
+...).Value }` returns **`$null` whenever the child is an empty COM enumerable** (a node
+with zero children, e.g. every Action/Method, and any freshly-created object). The
+scriptblock's output is pipeline-enumerated (empty -> nothing) *before* the wrapper's
+`Write-Output -NoEnumerate` can apply; no Get-SafeValue variant can preserve it (verified
+offline with capture / `$(...)` / comma-wrap). `tc_tree`'s `children` action works because
+it reads the child via **direct `.Value`** (a non-enumerable `[ref]`), never through that
+wrapper. Fixes:
+
+1. **Keystone** — converted all 9 `Get-SafeValue { (Get-TreeItemChild ...).Value }` child
+   fetches to direct `(Get-TreeItemChild ...).Value` (Get-TreeItemChild already returns a
+   non-enumerable `[ref]` and catches its own COM throw). This alone repaired `find`,
+   `outline` child enumeration, the create/folder result serialization, and the per-object
+   walks behind `search`.
+2. **`Invoke-PlcTreeWalk` shadowing** — the output hashtable was named `$node`, which (PS
+   is case-insensitive) clobbered the `$Node` COM parameter, killing recursion. Renamed to
+   `$result`.
+3. **`tree` depth off-by-one** — `Depth -ge MaxDepth` stopped at the root and emitted no
+   direct children for `depth:1`; changed to `-gt` (depth N => N levels of children).
+4. **`create` null-child** — `Invoke-PlcPouCreate`/`CreateFolder` did a bare `return $child`
+   on a 0-child object (empty enumerable -> $null). Switched to `[ref]` + caller `.Value`.
+5. **`search` `-Path ''` crash** — the up-front regex-validation call hit a mandatory
+   non-empty `[string]$Path`; added `[AllowEmptyString()]`.
+6. **`outline`/`get_decl` on impl-only objects** — Action/Transition have no
+   ITcPlcDeclaration; `get_decl` now returns an actionable "use get_impl" error, `outline`
+   degrades to `hasDeclaration:false` and still reports impl + child code items.
+7. **`delete` verify** — replaced the `.Child()` scan with a reliable LookupTreeItem-by-path
+   existence check.
+8. **`move`** — two bugs: individual `ExportChild` requires a plain **`.zip`** (not the
+   project-level `.tpzip` -> "doesn't specify a zip archive!"); AND export+import while the
+   original still exists forces a global-namespace auto-rename (`FB_x` -> `FB_x_1`).
+   Rewrote to **export(.zip) -> delete original -> import** (keeps the exact name), with
+   auto-recovery (re-import the backup under the old parent on failure) and, on total
+   failure, a preserved recovery archive whose path is reported. Verify is now by name-path.
+
+**Live re-verification (all PASS, project left clean):** `tree depth:1` lists all 47 MAIN
+children; `find "EOAT"` -> 18 hits across POUs/VISUs/Images; `search "VAR_GLOBAL"` scanned
+887 objects, 6 hits; `outline` MAIN -> 47 children + 4 var blocks, `outline` on `a0511_EOAT`
+-> hasDeclaration:false + 85 impl lines (no crash); `create_folder`/`create`/
+`create_folder_batch` return populated children (no false `failed`); `delete` dryRun + real
++ recursive; `move` FB into a subfolder keeps its name; `rename`. Offline suites still
+96/96. Throwaway objects AND the prior run's leftover `_TE1000_TEST` phantom were deleted
+(find `_TE1000` -> count 0). No save/download/activate performed.
+
+---
+
+## 2026-06-22 — LIVE test sweep of plc_pou (3 agents): surgical engine SOLID, tree/find/search/create-reporting/delete/move BROKEN
+
+First live exercise of the surgical buildout against an open "Cabsort Lite"
+solution in XAE (read-only snippet lane + read-only discovery lane in parallel,
+then a solo mutating lane on a throwaway `_TE1000_TEST` folder with cleanup).
+
+**WORKS (verified live, keep):**
+- `get_decl`/`get_impl` `range`, `grep` (+context), `lineCount`, range-clamp
+  (OOB → `{truncated:true}`, no crash), and `range`+`grep` mutual-exclusion
+  rejection. Confirmed on MAIN (882 decl / 268 impl lines).
+- Surgical edits **all preserve bytes outside the patched region** and **fail
+  atomically on bad anchors**: `append`, `insert` (at / after / before),
+  `insert_in_var_block` (lands before END_VAR), `replace` (anchored; non-unique
+  → "found N (no change written)", zero-match → "not present (no change
+  written)" — both verified byte-identical after), `replace_lines`.
+- `rename` (old path not-found, new path resolves, vars intact).
+- `outline` on a PROGRAM (var blocks + line ranges, no full text).
+
+**BROKEN — keystone is unreliable `.Child(index)` enumeration (already
+documented ~bridge line 1225 as disagreeing with LookupTreeItem-by-name):**
+1. **`tree` never recurses** — `children` array stays empty at any `depth`,
+   though `childCount` is correct (MAIN 47, project 11). Tree can't be walked.
+2. **`find` always returns `count:0`** — even for names proven to exist
+   (`MAIN`, `GvSys`, `a0005_Safety`). Depends on the broken walk. (Arg is
+   `name`, not `pattern`.)
+3. **`search` crashes** — bridge ~6807 invokes the matcher with `-Path ''`:
+   `Cannot bind argument to parameter 'Path' because it is an empty string`.
+4. **`create`/`create_folder`/`create_folder_batch` mislabel success as
+   failure** — the object IS created, but `Convert-TreeItem` gets a null
+   `$child` and throws during result serialization (~5911 create, ~5967
+   folder). `create_folder_batch` falsely reported `failed:2, succeeded:0` for
+   two folders that were actually created — a **dangerous lying roll-up**.
+5. **`delete` non-functional (all forms, dryRun + real)** — pre-delete verify
+   loop (~6879) enumerates via `$parent.Child($index)` and never finds the
+   child, so `DeleteChild($name)` is never reached. Lacks the
+   LookupTreeItem-by-name fallback used elsewhere. (`confirm` token param works.)
+6. **`move` broken** — export step `ExportChild` rejects the generated temp
+   `...te1000-plcmove-<guid>.tpzip` path ("doesn't specify a zip archive",
+   ~3065). Object left unmoved, no dup/partial.
+
+**SECONDARY:**
+7. `outline`/`get_decl` on an **Action/Transition** (impl-only, no declaration)
+   throws `E_NOINTERFACE` on `GetDeclaration` — should degrade to impl-only
+   instead of throwing. (Path resolves fine; `get_impl` works on it.)
+8. `outline` on a PROGRAM does not list child code items (actions/methods) —
+   only var blocks.
+9. Latent: when a tree item is resolved by name-path, `Convert-TreeItem` can
+   yield `Object[]` for itemType/subType; the `[int]$ItemSubType` cast (~2153)
+   then throws `Cannot convert Object[] to Int32`.
+
+**Cleanup note:** on-disk fully clean (agent removed the untracked
+`_TE1000_TEST` folder directly since `delete` is broken; touched nothing else).
+The open XAE solution still holds **file-less phantom nodes** (`_TE1000_TEST` +
+subs + FB) — harmless (nothing downloaded/activated/restarted), they vanish on
+next normal solution reload. A `discardChanges` reopen was correctly NOT done
+(would wipe the user's legitimate unsaved edits).
+
+**Fix priority:** (A) the `.Child()`→LookupTreeItem-by-name enumeration fix is
+the single highest-leverage change — it repairs `tree`, `find`, the
+create/folder result serialization, and `delete` verification together. (B)
+`search` `-Path ''`. (C) `move` temp-zip path. (D) impl-only `outline` guard.
+The surgical text engine itself needs no changes.
+
+---
+
+## 2026-06-22 — twincat_activate_configuration + restart is NOT equivalent to the IDE's atomic "Activate Configuration" (dropped the whole EtherCAT bus)
+
+Real deploy on the cell after an offline edit that **grew the PLC process image**
+(added `AdsAddr`/`AoeNetId` bytes to the `GvSys.R06.N03` input image + a new
+`GVL_EOAT_VABX_CoE`). The IDE's Activate Configuration is **atomic**: write
+config + (re)generate boot project + restart into Run + re-initialize the I/O
+mapping, all mutually consistent. The te1000 sequence split that into pieces that
+did not reconcile:
+
+1. `twincat_activate_configuration` → `{activated:true}`, but the **new PLC boot
+   project was not actually brought into Run**: tcads still read old symbols
+   (`R06.N03.State=8`, bus OP) and could NOT resolve the new symbols
+   (`AdsAddr`, `GVL_EOAT_VABX_CoE.*`); rescan/reconnect did not refresh.
+2. Reading that as "old boot project still running," ran `plc_download`
+   (bootproject) + `twincat_restart_runtime`. New symbols then resolved (new
+   code confirmed running) — **but the entire EtherCAT bus was down**: every box
+   every rack `State=0`, no PDO exchange, InputToggle frozen, all `AdsAddr` zero,
+   while system=Run / plc=Run. I.e. **new/larger PLC image loaded against a stale
+   I/O mapping** → mapping inconsistency → master never brought the bus up.
+3. The CoE write correctly never fired (`nWritesDone=0`, gated on a valid AoE
+   address that the dead bus couldn't provide) — so **no bad/partial SDO writes**.
+4. A **manual IDE Activate Configuration** reconciled PLC image + I/O mapping
+   together → bus recovered, code works.
+
+**Net finding:** on this build, `twincat_activate_configuration` (+ separate
+`plc_download`/`twincat_restart_runtime`) is **not** equivalent to the IDE's
+ActivateConfiguration, and for any change that alters the PLC process image it
+can leave the target in an inconsistent "new PLC / stale I/O mapping" state that
+drops the whole EtherCAT bus. **Investigate:** (a) does
+`twincat_activate_configuration` actually regenerate+activate the boot project
+and re-init I/O mapping (i.e. call the same `ActivateConfiguration` that the GUI
+does), or just push config? (b) provide a single atomic "activate like the IDE"
+verb so process-image-changing edits never require the manual-only step. Until
+fixed, the reliable operation for image-changing deploys is the **single IDE
+Activate Configuration** — do not substitute the split sequence.
+
+---
+
 ## 2026-06-22 — plc_pou surgical buildout: snippet reads, surgical edits, list/find, lifecycle, folders — branch `feature/plc-pou-surgical`
 
 Expanded `plc_pou` from a whole-section authoring tool into a token-frugal
