@@ -5,6 +5,36 @@ on real TwinCAT projects. Newest first.
 
 ---
 
+## 2026-06-22 — `createIO`: two polish items found during the full-rack (R03.CNC) test — TODO
+
+Both surfaced while building an entire CNC rack (EK1100 coupler + EL1904/EL2904/EL1008/EL2008/EL9011)
+in one `createIO` call. The call itself works end-to-end — coupler created first, terminals nested
+under it in the same call (cross-rack parent dependency resolves sequentially). These are follow-ups,
+not regressions.
+
+**1. [TODO] Garbled error string on parent-lookup failure.** When a rack's `parent` can't be resolved
+(e.g. because an earlier rack that should have created it failed), the per-entry error comes back as
+mojibake: `parent lookup failed: Item '??????'???????????????????????????????!' not found`. The path
+is being mangled — an encoding/quoting glitch in the bridge's error echo (likely the `(...)` / E-Bus
+name passing through a PowerShell error-message interpolation or a non-UTF8 round-trip). Fix: emit the
+actual requested parent path verbatim in the error. Cosmetic only — the `ok:false` and continue-on-error
+behaviour are correct.
+
+**2. [TODO] `Assert-WellFormedChild` is too strict for couplers that TwinCAT auto-places.** Appending a
+coupler (`EK1100`) to the **EtherCAT master** (`TIID^Device 2 (EtherCAT)`) succeeds at the TwinCAT level
+but TwinCAT **relocates** the box into the topology under the appropriate junction (observed: it landed
+under the `EK1122` at `R01.Main.N14` instead of directly under the master). The guard then sees
+"returned child path is not under requested parent", flags it malformed, and deletes the (validly
+created) box. Decide on one of: (a) relax the guard to accept TwinCAT's auto-chosen slot for couplers —
+detect by class/`9099` + actual path being a descendant rather than a direct child — and return the real
+path; or (b) keep the guard but document the rule clearly: **couplers must target the junction
+(`EK1122`) or their true parent, not the master or a sibling coupler**. Note the related TwinCAT
+topology rule observed: an `EK1100` cannot be appended under an `EK1200` (`Cannot append box ... to
+slave ...`) — couplers attach to a junction, not to a compact coupler. Whichever path is chosen, the
+docs should state the coupler-parent rule so callers pick the right `parent` up front.
+
+---
+
 ## 2026-06-21 — `createIO` replaces `create_rack`: native ESI expansion, generator deleted — branch `feature/createio-native`
 
 `createIO` replaces `create_rack`: native `ITcSmTreeItem.CreateChild(name, 9099, '', '<type>')` makes
