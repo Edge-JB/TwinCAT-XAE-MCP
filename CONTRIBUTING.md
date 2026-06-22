@@ -3,6 +3,10 @@
 Thanks for your interest in improving `te1000-mcp`. This document covers the architecture, the
 contract between the Node server and the PowerShell bridge, and the rules every change must respect.
 
+By participating, you agree to abide by our [Code of Conduct](CODE_OF_CONDUCT.md). Found a security
+issue — including a way to bypass the confirmation guards or reach the safety project? **Don't open a
+public issue**; follow the [Security Policy](SECURITY.md) instead.
+
 ## Architecture
 
 ```
