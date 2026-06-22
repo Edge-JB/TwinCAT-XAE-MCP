@@ -7187,7 +7187,7 @@ try {
             if ($null -eq $child) { throw 'CreateChild returned null opening C++ project' }
             $actualName = Get-SafeValue { [string]$child.Name }
             if ([string]::IsNullOrWhiteSpace([string]$actualName)) {
-                throw "open produced a ghost (blank name) — check the .vcxproj/.tczip path and subType ($file, subType=$subType)"
+                throw "open produced a ghost (blank name) - check the .vcxproj/.tczip path and subType ($file, subType=$subType)"
             }
 
             Write-JsonResult @{
@@ -7731,7 +7731,7 @@ try {
             if ($save) { Save-Solution -Dte $dte }
             $cur = [string]$sysManager.CurrentProjectVariant
             if ($cur -ne $variant) {
-                throw "CurrentProjectVariant is '$cur' after setting '$variant' — variant/group may not exist in the variant config"
+                throw "CurrentProjectVariant is '$cur' after setting '$variant' - variant/group may not exist in the variant config"
             }
 
             Write-JsonResult @{
