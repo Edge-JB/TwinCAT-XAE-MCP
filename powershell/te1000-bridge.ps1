@@ -903,6 +903,176 @@ public static class Te1000PlcPouHelper {
     return $null -ne ('Te1000PlcPouHelper' -as [type])
 }
 
+function Ensure-TcPlcLibraryManagerHelper {
+    # ITcPlcLibraryManager (and ITcPlcReferences / ITcPlcLibRef / ITcPlcLibrary /
+    # ITcPlcPlaceholderRef / ITcPlcLibRepositories / ITcPlcLibRepository) are vtable
+    # (IUnknown) interfaces; PowerShell cannot cast a __ComObject to them
+    # ([Interface]$obj is not a CLR QI in PS), so every QI + member call is done in a
+    # compiled C# helper, exactly as Te1000PlcProjectHelper / Te1000PlcPouHelper do.
+    # The manager lives on the References node (TIPC^<plc>^<plc> Project^References);
+    # QI/marshaling also requires the interfaces registered in the 64-bit registry view.
+    if ('Te1000PlcLibraryHelper' -as [type]) {
+        return $true
+    }
+    $libPath = Get-TcSysManagerLibPath
+    if (-not $libPath) {
+        return $false
+    }
+    $null = [System.Reflection.Assembly]::LoadFrom($libPath)
+    Add-Type -ReferencedAssemblies $libPath -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using TCatSysManagerLib;
+public static class Te1000PlcLibraryHelper {
+    // --- readers -----------------------------------------------------------
+    public static object[] ListReferences(object refsItem) {
+        ITcPlcLibraryManager mgr = (ITcPlcLibraryManager)refsItem;
+        ITcPlcReferences refs = mgr.References;
+        var list = new List<object[]>();
+        int count = refs.Count;
+        for (int i = 0; i < count; i++) {
+            ITcPlcLibRef r = refs[i];
+            string name = null, displayName = null, distributor = null, version = null, kind = "reference";
+            try { name = r.Name; } catch {}
+            ITcPlcPlaceholderRef ph = r as ITcPlcPlaceholderRef;
+            ITcPlcLibrary lib = r as ITcPlcLibrary;
+            if (ph != null) {
+                kind = "placeholder";
+                try { displayName = ph.DisplayName; } catch {}
+                try { distributor = ph.Distributor; } catch {}
+                try { if (name == null) name = ph.Name; } catch {}
+                try { version = ph.Version; } catch {}
+            } else if (lib != null) {
+                kind = "library";
+                try { displayName = lib.DisplayName; } catch {}
+                try { distributor = lib.Distributor; } catch {}
+                try { if (name == null) name = lib.Name; } catch {}
+                try { version = lib.Version; } catch {}
+            }
+            list.Add(new object[] { name, kind, displayName, distributor, version });
+        }
+        return list.ToArray();
+    }
+    public static object[] ScanLibraries(object refsItem) {
+        ITcPlcLibraryManager mgr = (ITcPlcLibraryManager)refsItem;
+        ITcPlcReferences libs = mgr.ScanLibraries();
+        var list = new List<object[]>();
+        int count = libs.Count;
+        for (int i = 0; i < count; i++) {
+            ITcPlcLibRef r = libs[i];
+            string name = null, version = null, distributor = null, displayName = null;
+            ITcPlcLibrary lib = r as ITcPlcLibrary;
+            if (lib != null) {
+                try { name = lib.Name; } catch {}
+                try { version = lib.Version; } catch {}
+                try { distributor = lib.Distributor; } catch {}
+                try { displayName = lib.DisplayName; } catch {}
+            } else {
+                try { name = r.Name; } catch {}
+            }
+            list.Add(new object[] { name, version, distributor, displayName });
+        }
+        return list.ToArray();
+    }
+    public static object[] ListRepositories(object refsItem) {
+        ITcPlcLibraryManager mgr = (ITcPlcLibraryManager)refsItem;
+        ITcPlcLibRepositories repos = mgr.Repositories;
+        var list = new List<object[]>();
+        int count = repos.Count;
+        for (int i = 0; i < count; i++) {
+            ITcPlcLibRepository repo = repos[i];
+            string name = null, folder = null;
+            try { name = repo.Name; } catch {}
+            try { folder = repo.Folder; } catch {}
+            list.Add(new object[] { name, folder });
+        }
+        return list.ToArray();
+    }
+    // --- writers (project-local .plcproj edits) ----------------------------
+    public static void AddLibrary(object refsItem, string name, string ver, string co) {
+        ((ITcPlcLibraryManager)refsItem).AddLibrary(name, ver, co);
+    }
+    public static void AddPlaceholder(object refsItem, string name, string defLib, string defVer, string defDist) {
+        ((ITcPlcLibraryManager)refsItem).AddPlaceholder(name, defLib, defVer, defDist);
+    }
+    public static void AddPlaceholderNameOnly(object refsItem, string name) {
+        ((ITcPlcLibraryManager)refsItem).AddPlaceholder(name);
+    }
+    public static void SetEffectiveResolution(object refsItem, string ph, string lib, string ver, string dist) {
+        ((ITcPlcLibraryManager)refsItem).SetEffectiveResolution(ph, lib, ver, dist);
+    }
+    public static void FreezePlaceholder(object refsItem, string name) {
+        ((ITcPlcLibraryManager)refsItem).FreezePlaceholder(name);
+    }
+    public static void FreezePlaceholderAll(object refsItem) {
+        ((ITcPlcLibraryManager)refsItem).FreezePlaceholder();
+    }
+    public static void RemoveReference(object refsItem, string name) {
+        ((ITcPlcLibraryManager)refsItem).RemoveReference(name);
+    }
+    // --- repo admin (machine-wide library store mutations) -----------------
+    public static void InstallLibrary(object refsItem, string repo, string path, bool overwrite) {
+        ((ITcPlcLibraryManager)refsItem).InstallLibrary(repo, path, overwrite);
+    }
+    public static void UninstallLibrary(object refsItem, string repo, string lib, string ver, string dist) {
+        ((ITcPlcLibraryManager)refsItem).UninstallLibrary(repo, lib, ver, dist);
+    }
+    public static void InsertRepository(object refsItem, string name, string folder, int idx) {
+        ((ITcPlcLibraryManager)refsItem).InsertRepository(name, folder, idx);
+    }
+    public static void RemoveRepository(object refsItem, string name) {
+        ((ITcPlcLibraryManager)refsItem).RemoveRepository(name);
+    }
+    public static void MoveRepository(object refsItem, string name, int idx) {
+        ((ITcPlcLibraryManager)refsItem).MoveRepository(name, idx);
+    }
+}
+'@
+    return $null -ne ('Te1000PlcLibraryHelper' -as [type])
+}
+
+function Resolve-PlcReferencesPath {
+    # Shared resolution for the plc_library verbs: returns the References-node tree
+    # path. Defaults to the first PLC under TIPC (TIPC^<plc>^<plc> Project^References).
+    param(
+        [Parameter(Mandatory = $true)] $SysManager,
+        [AllowNull()][string]$ReferencesPath
+    )
+    if (-not [string]::IsNullOrWhiteSpace($ReferencesPath)) {
+        return $ReferencesPath
+    }
+    $tipc = $SysManager.LookupTreeItem('TIPC')
+    if ([int]$tipc.ChildCount -lt 1) {
+        throw 'No PLC project found under TIPC'
+    }
+    $plcName = [string]$tipc.Child(1).Name
+    return "TIPC^$plcName^$plcName Project^References"
+}
+
+function Get-PlcLibraryReferencesItem {
+    # Resolve the References node and return the tree item, ensuring the typed
+    # ITcPlcLibraryManager helper is loaded (same failure message as plc_download).
+    param(
+        [Parameter(Mandatory = $true)] $SysManager,
+        [AllowNull()][string]$ReferencesPath
+    )
+    $path = Resolve-PlcReferencesPath -SysManager $SysManager -ReferencesPath $ReferencesPath
+    $refsItem = (Get-TreeItem -SysManager $SysManager -TreePath $path).Value
+    if (-not (Ensure-TcPlcLibraryManagerHelper)) {
+        throw 'TCatSysManagerLib.dll could not be loaded; the typed ITcPlcLibraryManager cast is required for PLC library operations on this shell'
+    }
+    return @{ path = $path; item = $refsItem }
+}
+
+$script:PlcLibraryRefNote = '.plcproj reference change requires a solution close+reopen in XAE to take effect (adding/removing/repinning a library or placeholder, set resolution); adding source files alone does not.'
+
+function Assert-PlcLibraryRepoConfirm {
+    param([AllowNull()][string]$Confirm)
+    if ($Confirm -ne 'ALLOW_PLC_LIBRARY_REPO') {
+        throw 'Blocked: confirm=ALLOW_PLC_LIBRARY_REPO required for repository administration.'
+    }
+}
+
 function Assert-NotSafetyPath {
     # Project policy: nothing in this toolchain may write toward the EL6910 safety
     # system. The safety project lives under the TISC root, so reject any parent /
@@ -4526,6 +4696,331 @@ try {
                     plcPath = $plcPath
                     instancePath = $instancePath
                     allObjectsValid = [bool]$valid
+                }
+            }
+            exit 0
+        }
+
+        'plc_library_list_references' {
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+            $resolved = Get-PlcLibraryReferencesItem -SysManager $sysManager -ReferencesPath ([string]$payload.referencesPath)
+            $rows = [Te1000PlcLibraryHelper]::ListReferences($resolved.item)
+            $refs = @()
+            foreach ($r in $rows) {
+                $refs += @{
+                    name = $r[0]
+                    kind = $r[1]
+                    displayName = $r[2]
+                    distributor = $r[3]
+                    version = $r[4]
+                }
+            }
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    referencesPath = $resolved.path
+                    count = $refs.Count
+                    references = $refs
+                }
+            }
+            exit 0
+        }
+
+        'plc_library_scan' {
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+            $resolved = Get-PlcLibraryReferencesItem -SysManager $sysManager -ReferencesPath ([string]$payload.referencesPath)
+            $rows = [Te1000PlcLibraryHelper]::ScanLibraries($resolved.item)
+            $libs = @()
+            foreach ($r in $rows) {
+                $libs += @{
+                    name = $r[0]
+                    version = $r[1]
+                    distributor = $r[2]
+                    displayName = $r[3]
+                }
+            }
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    count = $libs.Count
+                    libraries = $libs
+                }
+            }
+            exit 0
+        }
+
+        'plc_library_list_repositories' {
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+            $resolved = Get-PlcLibraryReferencesItem -SysManager $sysManager -ReferencesPath ([string]$payload.referencesPath)
+            $rows = [Te1000PlcLibraryHelper]::ListRepositories($resolved.item)
+            $repos = @()
+            foreach ($r in $rows) {
+                $repos += @{ name = $r[0]; folder = $r[1] }
+            }
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    count = $repos.Count
+                    repositories = $repos
+                }
+            }
+            exit 0
+        }
+
+        'plc_library_add_library' {
+            $name = [string]$payload.name
+            if ([string]::IsNullOrWhiteSpace($name)) { throw 'name is required' }
+            $version = if ($null -ne $payload.version) { [string]$payload.version } else { '' }
+            $company = if ($null -ne $payload.company) { [string]$payload.company } else { '' }
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+            $resolved = Get-PlcLibraryReferencesItem -SysManager $sysManager -ReferencesPath ([string]$payload.referencesPath)
+            [Te1000PlcLibraryHelper]::AddLibrary($resolved.item, $name, $version, $company)
+            $saved = $false
+            if ($payload.PSObject.Properties.Name -contains 'save' -and [bool]$payload.save) {
+                try { Save-Solution -Dte $dte; $saved = $true } catch { $saved = $false }
+            }
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    action = 'add_library'
+                    name = $name
+                    version = $version
+                    company = $company
+                    referencesPath = $resolved.path
+                    saved = $saved
+                    note = $script:PlcLibraryRefNote
+                }
+            }
+            exit 0
+        }
+
+        'plc_library_add_placeholder' {
+            $name = [string]$payload.name
+            if ([string]::IsNullOrWhiteSpace($name)) { throw 'name is required' }
+            $defLib = if ($null -ne $payload.defLib) { [string]$payload.defLib } else { '' }
+            $defVer = if ($null -ne $payload.defVer) { [string]$payload.defVer } else { '' }
+            $defDist = if ($null -ne $payload.defDist) { [string]$payload.defDist } else { '' }
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+            $resolved = Get-PlcLibraryReferencesItem -SysManager $sysManager -ReferencesPath ([string]$payload.referencesPath)
+            if (-not [string]::IsNullOrWhiteSpace($defLib)) {
+                [Te1000PlcLibraryHelper]::AddPlaceholder($resolved.item, $name, $defLib, $defVer, $defDist)
+            } else {
+                [Te1000PlcLibraryHelper]::AddPlaceholderNameOnly($resolved.item, $name)
+            }
+            $saved = $false
+            if ($payload.PSObject.Properties.Name -contains 'save' -and [bool]$payload.save) {
+                try { Save-Solution -Dte $dte; $saved = $true } catch { $saved = $false }
+            }
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    action = 'add_placeholder'
+                    name = $name
+                    defLib = $defLib
+                    defVer = $defVer
+                    defDist = $defDist
+                    referencesPath = $resolved.path
+                    saved = $saved
+                    note = $script:PlcLibraryRefNote
+                }
+            }
+            exit 0
+        }
+
+        'plc_library_set_resolution' {
+            $placeholder = [string]$payload.placeholder
+            $lib = [string]$payload.lib
+            if ([string]::IsNullOrWhiteSpace($placeholder)) { throw 'placeholder is required' }
+            if ([string]::IsNullOrWhiteSpace($lib)) { throw 'lib is required' }
+            $version = if ($null -ne $payload.version) { [string]$payload.version } else { '' }
+            $dist = if ($null -ne $payload.dist) { [string]$payload.dist } else { '' }
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+            $resolved = Get-PlcLibraryReferencesItem -SysManager $sysManager -ReferencesPath ([string]$payload.referencesPath)
+            [Te1000PlcLibraryHelper]::SetEffectiveResolution($resolved.item, $placeholder, $lib, $version, $dist)
+            $saved = $false
+            if ($payload.PSObject.Properties.Name -contains 'save' -and [bool]$payload.save) {
+                try { Save-Solution -Dte $dte; $saved = $true } catch { $saved = $false }
+            }
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    action = 'set_resolution'
+                    placeholder = $placeholder
+                    lib = $lib
+                    version = $version
+                    dist = $dist
+                    referencesPath = $resolved.path
+                    saved = $saved
+                    note = $script:PlcLibraryRefNote
+                }
+            }
+            exit 0
+        }
+
+        'plc_library_freeze_placeholder' {
+            $name = if ($null -ne $payload.name) { [string]$payload.name } else { '' }
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+            $resolved = Get-PlcLibraryReferencesItem -SysManager $sysManager -ReferencesPath ([string]$payload.referencesPath)
+            if (-not [string]::IsNullOrWhiteSpace($name)) {
+                [Te1000PlcLibraryHelper]::FreezePlaceholder($resolved.item, $name)
+            } else {
+                [Te1000PlcLibraryHelper]::FreezePlaceholderAll($resolved.item)
+            }
+            $saved = $false
+            if ($payload.PSObject.Properties.Name -contains 'save' -and [bool]$payload.save) {
+                try { Save-Solution -Dte $dte; $saved = $true } catch { $saved = $false }
+            }
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    action = 'freeze'
+                    name = if ([string]::IsNullOrWhiteSpace($name)) { '(all)' } else { $name }
+                    referencesPath = $resolved.path
+                    saved = $saved
+                    note = $script:PlcLibraryRefNote
+                }
+            }
+            exit 0
+        }
+
+        'plc_library_remove_reference' {
+            $name = [string]$payload.name
+            if ([string]::IsNullOrWhiteSpace($name)) { throw 'name is required' }
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+            $resolved = Get-PlcLibraryReferencesItem -SysManager $sysManager -ReferencesPath ([string]$payload.referencesPath)
+            [Te1000PlcLibraryHelper]::RemoveReference($resolved.item, $name)
+            $saved = $false
+            if ($payload.PSObject.Properties.Name -contains 'save' -and [bool]$payload.save) {
+                try { Save-Solution -Dte $dte; $saved = $true } catch { $saved = $false }
+            }
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    action = 'remove_reference'
+                    name = $name
+                    referencesPath = $resolved.path
+                    saved = $saved
+                    note = ($script:PlcLibraryRefNote + ' (Project-local edit only; does NOT uninstall from the repository.)')
+                }
+            }
+            exit 0
+        }
+
+        'plc_library_install_library' {
+            Assert-PlcLibraryRepoConfirm -Confirm ([string]$payload.confirm)
+            $repo = [string]$payload.repo
+            $libPath = [string]$payload.libPath
+            if ([string]::IsNullOrWhiteSpace($repo)) { throw 'repo is required' }
+            if ([string]::IsNullOrWhiteSpace($libPath)) { throw 'libPath is required' }
+            $overwrite = $false
+            if ($null -ne $payload.overwrite) { $overwrite = [bool]$payload.overwrite }
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+            $resolved = Get-PlcLibraryReferencesItem -SysManager $sysManager -ReferencesPath ([string]$payload.referencesPath)
+            [Te1000PlcLibraryHelper]::InstallLibrary($resolved.item, $repo, $libPath, $overwrite)
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    action = 'install_library'
+                    repo = $repo
+                    libPath = $libPath
+                    overwrite = $overwrite
+                }
+            }
+            exit 0
+        }
+
+        'plc_library_uninstall_library' {
+            Assert-PlcLibraryRepoConfirm -Confirm ([string]$payload.confirm)
+            $repo = [string]$payload.repo
+            $lib = [string]$payload.lib
+            if ([string]::IsNullOrWhiteSpace($repo)) { throw 'repo is required' }
+            if ([string]::IsNullOrWhiteSpace($lib)) { throw 'lib is required' }
+            $version = if ($null -ne $payload.version) { [string]$payload.version } else { '' }
+            $dist = if ($null -ne $payload.dist) { [string]$payload.dist } else { '' }
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+            $resolved = Get-PlcLibraryReferencesItem -SysManager $sysManager -ReferencesPath ([string]$payload.referencesPath)
+            [Te1000PlcLibraryHelper]::UninstallLibrary($resolved.item, $repo, $lib, $version, $dist)
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    action = 'uninstall_library'
+                    repo = $repo
+                    lib = $lib
+                    version = $version
+                    dist = $dist
+                }
+            }
+            exit 0
+        }
+
+        'plc_library_insert_repository' {
+            Assert-PlcLibraryRepoConfirm -Confirm ([string]$payload.confirm)
+            $name = [string]$payload.name
+            $folder = [string]$payload.folder
+            if ([string]::IsNullOrWhiteSpace($name)) { throw 'name is required' }
+            if ([string]::IsNullOrWhiteSpace($folder)) { throw 'folder is required' }
+            $index = 0
+            if ($null -ne $payload.index) { $index = [int]$payload.index }
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+            $resolved = Get-PlcLibraryReferencesItem -SysManager $sysManager -ReferencesPath ([string]$payload.referencesPath)
+            [Te1000PlcLibraryHelper]::InsertRepository($resolved.item, $name, $folder, $index)
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    action = 'insert_repository'
+                    name = $name
+                    folder = $folder
+                    index = $index
+                }
+            }
+            exit 0
+        }
+
+        'plc_library_remove_repository' {
+            Assert-PlcLibraryRepoConfirm -Confirm ([string]$payload.confirm)
+            $name = [string]$payload.name
+            if ([string]::IsNullOrWhiteSpace($name)) { throw 'name is required' }
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+            $resolved = Get-PlcLibraryReferencesItem -SysManager $sysManager -ReferencesPath ([string]$payload.referencesPath)
+            [Te1000PlcLibraryHelper]::RemoveRepository($resolved.item, $name)
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    action = 'remove_repository'
+                    name = $name
+                }
+            }
+            exit 0
+        }
+
+        'plc_library_move_repository' {
+            Assert-PlcLibraryRepoConfirm -Confirm ([string]$payload.confirm)
+            $name = [string]$payload.name
+            if ([string]::IsNullOrWhiteSpace($name)) { throw 'name is required' }
+            if ($null -eq $payload.index) { throw 'index is required' }
+            $index = [int]$payload.index
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+            $resolved = Get-PlcLibraryReferencesItem -SysManager $sysManager -ReferencesPath ([string]$payload.referencesPath)
+            [Te1000PlcLibraryHelper]::MoveRepository($resolved.item, $name, $index)
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    action = 'move_repository'
+                    name = $name
+                    index = $index
                 }
             }
             exit 0

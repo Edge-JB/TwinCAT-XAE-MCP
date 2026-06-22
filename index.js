@@ -23,6 +23,7 @@ const XAE_COMMAND_CONFIRMATION = "ALLOW_XAE_COMMAND_EXEC";
 const PLC_LOGOUT_CONFIRMATION = "ALLOW_PLC_LOGOUT";
 const DELETE_CONFIRMATION = "ALLOW_TWINCAT_DELETE";
 const PLC_DOWNLOAD_CONFIRMATION = "ALLOW_PLC_DOWNLOAD";
+const PLC_LIBRARY_REPO_CONFIRMATION = "ALLOW_PLC_LIBRARY_REPO";
 
 // --- Modal-dialog watchdog -------------------------------------------------
 // A bridge COM call into XAE blocks until any modal dialog it raises is
@@ -776,6 +777,93 @@ server.registerTool(
         return textResult(await bridgeCall("plc_pou_set_document", { path: p.path, documentXml: p.documentXml }));
       case "check_objects":
         return textResult(await bridgeCall("plc_pou_check_objects", { plcPath: p.plcPath }));
+    }
+  },
+);
+
+server.registerTool(
+  "plc_library",
+  {
+    description:
+      'PLC library references / placeholders / repositories via ITcPlcLibraryManager on the References node (TIPC^<plc>^<plc> Project^References). referencesPath defaults to the first PLC under TIPC. ' +
+      'READ (no side effects): list (References → name/kind library|placeholder/displayName/distributor/version), scan (ScanLibraries → installed libs name/version/distributor/displayName), repos (Repositories → name/folder). ' +
+      'WRITE — OFFLINE .plcproj edits, NO live-cell impact (not confirm-gated): add_library (name, version?, company?), add_placeholder (name, defLib?/defVer?/defDist? — omit defLib for the name-only form), set_resolution (placeholder, lib, version?, dist?), freeze (name? — omit to freeze ALL), remove_reference (name = library or placeholder). Each accepts save:true to File.SaveAll after the edit. ' +
+      'LANDMINE: a .plcproj library-reference edit (add/remove/repin a library or placeholder, set resolution) requires a full solution close+reopen in XAE before it takes effect; adding source files alone does not — the response surfaces this note. ' +
+      'REPO ADMIN — GUARDED, mutates the machine-wide TwinCAT library store (no runtime/cell change, but shared-machine state): install_library (repo, libPath, overwrite?), uninstall_library (repo, lib, version?, dist?), insert_repository (name, folder, index?), remove_repository (name), move_repository (name, index). These require confirm="' + PLC_LIBRARY_REPO_CONFIRMATION + '". Nothing here targets the safety system (References live only under TIPC).',
+    inputSchema: {
+      action: z.enum([
+        "list", "scan", "repos",
+        "add_library", "add_placeholder", "set_resolution", "freeze", "remove_reference",
+        "install_library", "uninstall_library", "insert_repository", "remove_repository", "move_repository",
+      ]),
+      referencesPath: z.string().optional().describe("References node path; default = first PLC under TIPC"),
+      name: z.string().optional(),
+      version: z.string().optional(),
+      company: z.string().optional(),
+      defLib: z.string().optional(),
+      defVer: z.string().optional(),
+      defDist: z.string().optional(),
+      placeholder: z.string().optional(),
+      lib: z.string().optional(),
+      dist: z.string().optional(),
+      repo: z.string().optional(),
+      libPath: z.string().optional(),
+      overwrite: z.boolean().optional(),
+      folder: z.string().optional(),
+      index: z.number().int().optional(),
+      save: z.boolean().optional(),
+      confirm: z.string().optional(),
+      mode: z.enum(["active", "activeOrCreate", "create"]).optional().describe("DTE attach mode; default active"),
+    },
+  },
+  async (p) => {
+    const repoGuard = () => {
+      if (p.confirm !== PLC_LIBRARY_REPO_CONFIRMATION) {
+        throw new Error('Blocked. ' + p.action + ' mutates the machine-wide TwinCAT library store. Re-run with confirm="' + PLC_LIBRARY_REPO_CONFIRMATION + '" to proceed.');
+      }
+    };
+    const base = { referencesPath: p.referencesPath, mode: p.mode };
+    switch (p.action) {
+      case "list":
+        return textResult(await bridgeCall("plc_library_list_references", base));
+      case "scan":
+        return textResult(await bridgeCall("plc_library_scan", base));
+      case "repos":
+        return textResult(await bridgeCall("plc_library_list_repositories", base));
+      case "add_library":
+        need(p, ["name"], p.action);
+        return textResult(await bridgeCall("plc_library_add_library", { ...base, name: p.name, version: p.version, company: p.company, save: p.save === true }));
+      case "add_placeholder":
+        need(p, ["name"], p.action);
+        return textResult(await bridgeCall("plc_library_add_placeholder", { ...base, name: p.name, defLib: p.defLib, defVer: p.defVer, defDist: p.defDist, save: p.save === true }));
+      case "set_resolution":
+        need(p, ["placeholder", "lib"], p.action);
+        return textResult(await bridgeCall("plc_library_set_resolution", { ...base, placeholder: p.placeholder, lib: p.lib, version: p.version, dist: p.dist, save: p.save === true }));
+      case "freeze":
+        return textResult(await bridgeCall("plc_library_freeze_placeholder", { ...base, name: p.name, save: p.save === true }));
+      case "remove_reference":
+        need(p, ["name"], p.action);
+        return textResult(await bridgeCall("plc_library_remove_reference", { ...base, name: p.name, save: p.save === true }));
+      case "install_library":
+        repoGuard();
+        need(p, ["repo", "libPath"], p.action);
+        return textResult(await bridgeCall("plc_library_install_library", { ...base, confirm: p.confirm, repo: p.repo, libPath: p.libPath, overwrite: p.overwrite === true }));
+      case "uninstall_library":
+        repoGuard();
+        need(p, ["repo", "lib"], p.action);
+        return textResult(await bridgeCall("plc_library_uninstall_library", { ...base, confirm: p.confirm, repo: p.repo, lib: p.lib, version: p.version, dist: p.dist }));
+      case "insert_repository":
+        repoGuard();
+        need(p, ["name", "folder"], p.action);
+        return textResult(await bridgeCall("plc_library_insert_repository", { ...base, confirm: p.confirm, name: p.name, folder: p.folder, index: p.index }));
+      case "remove_repository":
+        repoGuard();
+        need(p, ["name"], p.action);
+        return textResult(await bridgeCall("plc_library_remove_repository", { ...base, confirm: p.confirm, name: p.name }));
+      case "move_repository":
+        repoGuard();
+        need(p, ["name", "index"], p.action);
+        return textResult(await bridgeCall("plc_library_move_repository", { ...base, confirm: p.confirm, name: p.name, index: p.index }));
     }
   },
 );
