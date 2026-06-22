@@ -5,6 +5,33 @@ on real TwinCAT projects. Newest first.
 
 ---
 
+## 2026-06-22 — plc_pou: read-only `get_graphical` accessor for LD/FBD/SFC/CFC bodies + fixed misleading get_impl hint
+
+Graphical bodies have no authoritative `ImplementationText`, and `get_document`
+(`GetDocumentXml`) only works on a **top-level POU** — it `E_NOINTERFACE`s on a
+sub-`Action`/`Method` (which is what most graphical code is). The old `get_impl`
+hint told callers to "use get_document", which fails for exactly those objects.
+
+Added **`get_graphical` (path)** — read-only/diagnostic. For a POU-level object it
+reads `GetDocumentXml(item)`; for a child it reads the **parent POU's** document and
+extracts the named element's `<Implementation>` via the pure `Get-GraphicalImplXml`
+helper. Returns `{language,languageName,itemType,source:"live-document",readOnly:
+true,xml}` where `xml` is the network archive (NWL "BoxTree" for LD/FBD/IL, or the
+SFC/CFC archive). Refuses textual (ST/IL) objects with a pointer to `get_impl`, and
+refuses TISC. Fixed the `get_impl` graphical hint to point at `get_graphical` and to
+note the get_document/POU-only constraint. Documented in README (Read + Inspect
+graphical bullets) and the index.js tool description; `get_graphical` added to the
+action enum + routing.
+
+Verified live on "Cabsort Lite": `get_graphical` on the LD action `a0006_Fence`
+returned its 67 KB NWL network (language 6/LD, itemType 608, source live-document);
+the ladder is reconstructable from it (e.g. rung 0 `bRdy2Enter := CellState.Rqst2Enter
+AND (FmRbt_TeachLockOn OR FmRbt_TeachMode OR CellState.Man)`). `get_graphical` on the
+ST action `a0001_init` is correctly refused -> use get_impl. NOTE: graphical bodies
+remain **read-only** here by design; authoring graphical logic stays in the XAE GUI.
+
+---
+
 ## 2026-06-22 — FIXED all plc_pou sweep bugs; re-verified live end-to-end on "Cabsort Lite"
 
 Root cause of the whole tree/find/outline/create/delete cluster turned out to be a

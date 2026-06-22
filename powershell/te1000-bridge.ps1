@@ -2129,6 +2129,61 @@ function Refuse-GraphicalText {
     throw "Refused surgical text edit on $($Path): implementation language is $name; ImplementationText is not authoritative for graphical languages. Use set_impl implXml (whole-XML round-trip) instead."
 }
 
+function Get-GraphicalImplXml {
+    # PURE. Extract the <Implementation> outerXml for one code object out of a TwinCAT
+    # PLC *document* XML (the GetDocumentXml output, == the .TcPOU file content). For a
+    # top-level POU (IsPouLevel) that is the POU element's own direct <Implementation>;
+    # for a child Action/Method/Transition/Property it is that named element's
+    # <Implementation>. The returned XML IS the graphical network: an <NWL><XmlArchive>
+    # 'BoxTree' for LD/FBD/IL, or the SFC/CFC archive. Returns $null when the object or
+    # its Implementation is not present. No COM -> unit-testable offline.
+    param(
+        [Parameter(Mandatory = $true)][string]$DocumentXml,
+        [Parameter(Mandatory = $true)][string]$ObjectName,
+        [bool]$IsPouLevel = $false
+    )
+    if ([string]::IsNullOrWhiteSpace($DocumentXml)) { return $null }
+    $doc = New-Object System.Xml.XmlDocument
+    $doc.PreserveWhitespace = $true
+    $doc.LoadXml($DocumentXml)
+    $root = $doc.DocumentElement   # <TcPlcObject>
+    if ($null -eq $root) { return $null }
+
+    # The single code container under <TcPlcObject> (prefer a 'POU' element, else the
+    # first element child).
+    $container = $null
+    foreach ($c in $root.ChildNodes) {
+        if ($c.NodeType -ne [System.Xml.XmlNodeType]::Element) { continue }
+        if ($c.LocalName -eq 'POU') { $container = $c; break }
+        if ($null -eq $container) { $container = $c }
+    }
+    if ($null -eq $container) { return $null }
+
+    if ($IsPouLevel) {
+        foreach ($n in $container.ChildNodes) {
+            if ($n.NodeType -eq [System.Xml.XmlNodeType]::Element -and $n.LocalName -eq 'Implementation') {
+                return $n.OuterXml
+            }
+        }
+        return $null
+    }
+
+    $kinds = @('Action', 'Method', 'Transition', 'Property')
+    foreach ($n in $container.ChildNodes) {
+        if ($n.NodeType -ne [System.Xml.XmlNodeType]::Element) { continue }
+        if ($kinds -notcontains $n.LocalName) { continue }
+        $nm = $n.GetAttribute('Name')
+        if ($nm -eq $ObjectName) {
+            foreach ($impl in $n.ChildNodes) {
+                if ($impl.NodeType -eq [System.Xml.XmlNodeType]::Element -and $impl.LocalName -eq 'Implementation') {
+                    return $impl.OuterXml
+                }
+            }
+        }
+    }
+    return $null
+}
+
 # =====================================================================
 # plc_pou list/find/delete: IEC project tree-walk helpers.
 # Get-PlcObjectTypeName is PURE (int/string in, label out) and unit-testable
@@ -6151,7 +6206,7 @@ try {
                         language = $language
                         lineCount = 0
                         graphical = $true
-                        hint = 'use get_document for implXml'
+                        hint = 'graphical body (no authoritative text); use get_graphical to inspect the network XML (read-only). get_document works only on a top-level POU, not on an Action/Method/Transition.'
                     }
                 }
                 exit 0
@@ -6485,6 +6540,70 @@ try {
                 data = @{
                     path = $path
                     xml = $documentXml
+                }
+            }
+            exit 0
+        }
+
+        'plc_pou_get_graphical' {
+            # READ-ONLY inspection of a graphical (LD/FBD/SFC/CFC) body. ImplementationText
+            # is not authoritative for graphical code; the network lives as XML in the POU's
+            # document. GetDocumentXml needs ITcPlcPou (only the TOP-LEVEL POU implements it,
+            # not a sub-Action/Method), so for a child object we fetch the PARENT POU's
+            # document and extract the named element's <Implementation>. Live (reflects
+            # in-memory edits). Refuses textual languages (use get_impl) and TISC.
+            $path = [string]$payload.path
+            if ([string]::IsNullOrWhiteSpace($path)) { throw 'path is required' }
+            Assert-NotSafetyPath -Path $path
+            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
+            $sysManager = (Get-SysManager -Dte $dte).Value
+            $item = (Get-TreeItem -SysManager $sysManager -TreePath $path).Value
+            if (-not (Ensure-TcPlcPouHelper)) {
+                throw 'typed PLC cast unavailable on this shell (TCatSysManagerLib.dll / Te1000PlcPouHelper could not be loaded)'
+            }
+
+            $language = $null
+            try { $language = [Te1000PlcPouHelper]::GetImplementationLanguage($item) } catch { }
+            if (($null -ne $language) -and (-not (Test-PlcGraphicalLanguage -Language $language))) {
+                throw "get_graphical: '$path' is a textual language ($(Get-PlcLanguageName -Language $language)); its body IS authoritative as text. Use get_impl instead."
+            }
+
+            $info = Convert-TreeItem -TreeItem $item
+            $objName = [string]$info.name
+            $itemType = if ($null -eq $info.itemType) { -1 } else { [int]$info.itemType }
+            # POU-level code containers (PROGRAM 602 / FUNCTION 603 / FUNCTIONBLOCK 604)
+            # implement ITcPlcPou directly; everything else (Action 608/Method 609/
+            # Transition 616/Property 611) is a child of its POU.
+            $isPouLevel = (@(602, 603, 604) -contains $itemType)
+
+            $docXml = $null
+            if ($isPouLevel) {
+                $docXml = [Te1000PlcPouHelper]::GetDocumentXml($item)
+            } else {
+                $idx = $path.LastIndexOf('^')
+                if ($idx -lt 1) { throw "get_graphical: '$path' has no parent POU segment" }
+                $parentPath = $path.Substring(0, $idx)
+                $parentItem = (Get-TreeItem -SysManager $sysManager -TreePath $parentPath).Value
+                $docXml = [Te1000PlcPouHelper]::GetDocumentXml($parentItem)
+            }
+
+            $implXml = Get-GraphicalImplXml -DocumentXml $docXml -ObjectName $objName -IsPouLevel $isPouLevel
+            if ($null -eq $implXml) {
+                throw "get_graphical: could not locate the <Implementation> for '$objName' in the POU document. (itemType=$itemType, isPouLevel=$isPouLevel)"
+            }
+
+            Write-JsonResult @{
+                ok = $true
+                data = @{
+                    path = $path
+                    name = $objName
+                    language = $language
+                    languageName = (Get-PlcLanguageName -Language $language)
+                    itemType = $itemType
+                    source = 'live-document'
+                    readOnly = $true
+                    note = 'Graphical network XML (NWL/SFC/CFC archive). Read-only/diagnostic; not text-editable. To change graphical logic, edit in the XAE GUI.'
+                    xml = $implXml
                 }
             }
             exit 0

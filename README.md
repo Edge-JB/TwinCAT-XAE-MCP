@@ -222,10 +222,22 @@ license action is `confirm`-token gated (see "Guards" at the end of this list).
   - **Folders** — `create_folder`, `create_folder_batch` (PLC folder, sub-type
     601). `create`/`create_batch` already author directly into a folder when the
     folder's `^`-path is the `parent`.
-  - **Read** — `get_decl`, `get_impl`, `get_document`, plus `outline` (structure
-    without the full blob). `get_decl`/`get_impl` accept an optional `range`
-    {start,end} line slice **or** `grep` {pattern,context} so you read only the
-    lines you need — not the whole object.
+  - **Read** — `get_decl`, `get_impl`, `get_document`, `get_graphical`, plus
+    `outline` (structure without the full blob). `get_decl`/`get_impl` accept an
+    optional `range` {start,end} line slice **or** `grep` {pattern,context} so you
+    read only the lines you need — not the whole object. `get_impl` on a graphical
+    body (LD/FBD/SFC/CFC) returns `language` + `graphical:true` + a hint instead of
+    text.
+  - **Inspect graphical code (read-only)** — `get_graphical` (path) returns the
+    `<Implementation>` network XML of a graphical object — an NWL "BoxTree" archive
+    for LD/FBD/IL or the SFC/CFC archive — so you can *read/parse* ladder etc.
+    `ImplementationText` is not authoritative for graphical languages, and
+    `get_document`/`GetDocumentXml` only work on a **top-level POU** (not a sub-
+    `Action`/`Method`), so `get_graphical` fetches the parent POU's live document and
+    extracts the named element. Returns `{language,languageName,itemType,source:
+    "live-document",readOnly:true,xml}`. Diagnostic only — graphical bodies are
+    **not** text-editable here; change them in the XAE GUI. Textual (ST/IL) objects
+    are refused with a pointer to `get_impl`.
   - **Whole-section write** — `set_decl`, `set_decl_batch`, `set_impl`,
     `set_impl_batch`, `set_document`.
   - **Surgical edit (read-modify-write)** — `replace` (literal substring +
@@ -235,7 +247,8 @@ license action is `confirm`-token gated (see "Guards" at the end of this list).
     and return **only the changed region ±2 context lines** — never the whole
     blob. CRLF/LF is preserved byte-for-byte; non-unique/zero-match anchors and
     out-of-bounds ranges **fail without writing**; graphical (FBD/LD/SFC/CFC)
-    implementations are refused. Pass `validate:true` to run CheckAllObjects
+    implementations are refused (inspect them read-only with `get_graphical`). Pass
+    `validate:true` to run CheckAllObjects
     after. This is the token-savings model: a small `get_decl range/grep` +
     `replace` round-trip costs a fraction of fetching and re-uploading the full
     declaration/implementation text.
