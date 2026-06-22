@@ -1358,15 +1358,14 @@ server.registerTool(
       "logger_create (name, before?) — CreateChild a DataLogger (subType 1) under TIAN (config edit, no confirm); " +
       "logger_delete (name, dryRun?, confirm) — DeleteChild under TIAN, GUARDED confirm=\"" + DELETE_CONFIRMATION + "\" (dryRun:true previews existence without deleting); " +
       "stream_create (name, before?) — CreateChild a StreamHelper (subType 0) under TIAN (config edit, no confirm); " +
-      "stream_delete (name, dryRun?, confirm) — DeleteChild under TIAN, GUARDED confirm=\"" + DELETE_CONFIRMATION + "\"; the actual node name is '<name>_Obj1 (StreamHelper)' (the suffix is appended for you); " +
-      "node_get_xml (path, summary?) / node_set_xml (path, xml, returnXml?) — convenience aliases for ProduceXml/ConsumeXml SetParameter on a TIAN logger/stream node (e.g. 'TIAN^<loggerName>'); identical to tc_tree get_xml/set_xml. " +
+      "stream_delete (name, dryRun?, confirm) — DeleteChild under TIAN, GUARDED confirm=\"" + DELETE_CONFIRMATION + "\"; the actual node name is '<name>_Obj1 (StreamHelper)' (the suffix is appended for you). " +
+      "For raw ProduceXml/ConsumeXml on a TIAN logger/stream node (e.g. 'TIAN^<loggerName>') use tc_tree get_xml/set_xml. " +
       "OMITTED as UNVERIFIED: Scope data-export (SaveSVD/ExportCSV/ExportTDMS/ExportBinary/ExportDAT), Scope-Server (ShowControl/CloseControl/Disconnect), LookUpChild, and all Scope/Analytics enums. Nothing here targets the safety system.",
     inputSchema: {
       action: z.enum([
         "scope_create", "scope_add_child", "scope_rename", "scope_record",
         "analytics_create",
         "logger_create", "logger_delete", "stream_create", "stream_delete",
-        "node_get_xml", "node_set_xml",
       ]),
       name: z.string().optional(),
       template: z.string().optional(),
