@@ -4518,38 +4518,6 @@ try {
             exit 0
         }
 
-        'plc_project_check' {
-            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
-            $sysManager = (Get-SysManager -Dte $dte).Value
-            $treePath = [string]$payload.treePath
-            if ([string]::IsNullOrWhiteSpace($treePath)) {
-                $tipc = $sysManager.LookupTreeItem('TIPC')
-                if ([int]$tipc.ChildCount -lt 1) {
-                    throw 'No PLC project found under TIPC'
-                }
-                $treePath = "TIPC^$([string]$tipc.Child(1).Name)"
-            }
-            $item = (Get-TreeItem -SysManager $sysManager -TreePath $treePath).Value
-            if (-not (Ensure-TcPlcProjectHelper)) {
-                throw 'TCatSysManagerLib.dll could not be loaded; the typed ITcPlcIECProject2 cast is required for plc_project_check on this shell'
-            }
-            $valid = $null
-            try {
-                $valid = [Te1000PlcProjectHelper]::CheckAll($item)
-            } catch {
-                throw "node '$treePath' does not implement ITcPlcIECProject2 (use the nested project instance node, e.g. TIPC^<name>^<name> Project): $($_.Exception.Message)"
-            }
-
-            Write-JsonResult @{
-                ok = $true
-                data = @{
-                    treePath = $treePath
-                    allObjectsValid = [bool]$valid
-                }
-            }
-            exit 0
-        }
-
         'plc_project_boot_flags' {
             $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
             $sysManager = (Get-SysManager -Dte $dte).Value
@@ -4676,38 +4644,6 @@ try {
                     treePath = $treePath
                     command = $command
                     executed = $true
-                }
-            }
-            exit 0
-        }
-
-        'plc_project_link_task' {
-            $treePath = [string]$payload.treePath
-            $taskPath = [string]$payload.taskPath
-            if ([string]::IsNullOrWhiteSpace($treePath)) {
-                throw 'treePath is required'
-            }
-            if ([string]::IsNullOrWhiteSpace($taskPath)) {
-                throw 'taskPath is required'
-            }
-            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
-            $sysManager = (Get-SysManager -Dte $dte).Value
-            $item = (Get-TreeItem -SysManager $sysManager -TreePath $treePath).Value
-            if (-not (Ensure-TcPlcProjectHelper)) {
-                throw 'TCatSysManagerLib.dll could not be loaded; the typed ITcPlcTaskReference cast is required for plc_project_link_task on this shell'
-            }
-            $linked = $null
-            try {
-                $linked = [Te1000PlcProjectHelper]::SetLinkedTask($item, $taskPath)
-            } catch {
-                throw "node '$treePath' does not implement ITcPlcTaskReference (treePath must be the PlcTask reference node under the project instance): $($_.Exception.Message)"
-            }
-
-            Write-JsonResult @{
-                ok = $true
-                data = @{
-                    treePath = $treePath
-                    linkedTask = $linked
                 }
             }
             exit 0
@@ -5221,8 +5157,8 @@ try {
             # project INSTANCE node ('<plcName> Instance'). The instance node is what
             # tree-child enumeration surfaces under the PLC root, but it does NOT QI to
             # ITcPlcIECProject2 (E_NOINTERFACE). The IEC project node is reachable by
-            # name via LookupTreeItem at '<plcPath>^<rootName> Project'. Resolve it the
-            # same way plc_project_check does -- a direct LookupTreeItem + a single
+            # name via LookupTreeItem at '<plcPath>^<rootName> Project'. Resolve it via
+            # a direct LookupTreeItem + a single
             # Te1000PlcProjectHelper::CheckAll on the freshly resolved RCW (looping over
             # cached RCWs stored in a collection was observed to QI-fail E_NOINTERFACE).
             if (-not (Ensure-TcPlcProjectHelper)) {
@@ -5254,7 +5190,7 @@ try {
             $resolved = $false
             foreach ($candPath in $candidatePaths) {
                 try {
-                    # Resolve a FRESH RCW per attempt (mirrors plc_project_check exactly).
+                    # Resolve a FRESH RCW per attempt.
                     $node = (Get-TreeItem -SysManager $sysManager -TreePath $candPath).Value
                     $valid = [Te1000PlcProjectHelper]::CheckAll($node)
                     $instancePath = $candPath
@@ -7233,56 +7169,6 @@ try {
                     contextId = $contextId
                     taskObjectId = $taskObjectId
                     contextSet = $true
-                }
-            }
-            exit 0
-        }
-
-        'twincat_module_link_variables' {
-            $producer = [string]$payload.a
-            $consumer = [string]$payload.b
-            $autoResolve = $true
-            if ($payload.PSObject.Properties.Name -contains 'autoResolve') {
-                $autoResolve = [bool]$payload.autoResolve
-            }
-            if ([string]::IsNullOrWhiteSpace($producer) -or [string]::IsNullOrWhiteSpace($consumer)) {
-                throw 'a and b are required'
-            }
-
-            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
-            $sysManager = (Get-SysManager -Dte $dte).Value
-
-            $result = Link-Variables -SysManager $sysManager -Producer $producer -Consumer $consumer -AutoResolve $autoResolve
-
-            Write-JsonResult @{
-                ok = $true
-                data = $result
-            }
-            exit 0
-        }
-
-        'twincat_module_unlink_variables' {
-            $variableA = [string]$payload.a
-            $variableB = if ($payload.PSObject.Properties.Name -contains 'b') { [string]$payload.b } else { $null }
-            if ([string]::IsNullOrWhiteSpace($variableA)) {
-                throw 'a is required'
-            }
-
-            $dte = Get-Dte -ProgId $progId -Mode $mode -Visible $true
-            $sysManager = (Get-SysManager -Dte $dte).Value
-
-            if ([string]::IsNullOrWhiteSpace($variableB)) {
-                $sysManager.UnlinkVariables($variableA)
-            } else {
-                $sysManager.UnlinkVariables($variableA, $variableB)
-            }
-
-            Write-JsonResult @{
-                ok = $true
-                data = @{
-                    variableA = $variableA
-                    variableB = $variableB
-                    unlinked = $true
                 }
             }
             exit 0

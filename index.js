@@ -733,21 +733,20 @@ server.registerTool(
   "plc_project",
   {
     description:
-      'PLC (IEC) project lifecycle on the open solution. Tree paths use ^ separators; the PLC ROOT node is TIPC^<name>, the nested project INSTANCE node is TIPC^<name>^<name> Project. NODE MATTERS: ITcPlcProject (boot flags / generate_boot) is on the ROOT; ITcPlcIECProject* (check / plcopen_export/import / save_as_library) is on the INSTANCE node; ITcPlcTaskReference (link_task) is on the PlcTask node. ' +
-      'Actions: create_from_template (name, template, before?, save?) — new PLC project from a stock template; open (name, file=.plcproj/.tpzip, subType 0 copy/1 move/2 use-in-place, before?, save?) — import an existing project; info (treePath? default first under TIPC) — read identity (nestedProjectName/instanceName/childCount); check (treePath? = INSTANCE node) — CheckAllObjects build-validate, returns allObjectsValid; set_boot_flags (treePath? = ROOT, autostart?, tmcFileCopy?) — config-only boot flags; ' +
-      'plcopen_export (file, treePath? = INSTANCE, selection?) — write PLCopen XML; plcopen_import (file, treePath? = INSTANCE, options 0 NONE/1 RENAME/2 REPLACE/3 SKIP, selection?, folderStructure? default true, save?) — import PLCopen XML; save_as_library (file, treePath? = INSTANCE, install? default false — install:true mutates the local library repository) — save project as .library; link_task (treePath = PlcTask node, taskPath = ^-path of TIRT/TINC task) — set LinkedTask. ' +
+      'PLC (IEC) project lifecycle on the open solution. Tree paths use ^ separators; the PLC ROOT node is TIPC^<name>, the nested project INSTANCE node is TIPC^<name>^<name> Project. NODE MATTERS: ITcPlcProject (boot flags / generate_boot) is on the ROOT; ITcPlcIECProject* (plcopen_export/import / save_as_library) is on the INSTANCE node. ' +
+      'Actions: create_from_template (name, template, before?, save?) — new PLC project from a stock template; open (name, file=.plcproj/.tpzip, subType 0 copy/1 move/2 use-in-place, before?, save?) — import an existing project; info (treePath? default first under TIPC) — read identity (nestedProjectName/instanceName/childCount); set_boot_flags (treePath? = ROOT, autostart?, tmcFileCopy?) — config-only boot flags; ' +
+      'plcopen_export (file, treePath? = INSTANCE, selection?) — write PLCopen XML; plcopen_import (file, treePath? = INSTANCE, options 0 NONE/1 RENAME/2 REPLACE/3 SKIP, selection?, folderStructure? default true, save?) — import PLCopen XML; save_as_library (file, treePath? = INSTANCE, install? default false — install:true mutates the local library repository) — save project as .library. ' +
       'GUARDED (live runtime/target writes), require confirm="' + PLC_DOWNLOAD_CONFIRMATION + '" and default to no-op: generate_boot_project (treePath? = ROOT, autostart? default true) — generates the boot project to the target boot dir (restart runtime to load); online (command login/logout/start/stop/reset_cold/reset_origin, treePath? — changes live online/runtime state; the ConsumeXml envelope is UNVERIFIED on this build and surfaces GetLastXmlError verbatim, reset_* need a prior login, build>=4010). Safety projects are deliberately out of scope.',
     inputSchema: {
       action: z.enum([
-        "create_from_template", "open", "info", "check", "set_boot_flags",
-        "generate_boot_project", "online", "link_task",
+        "create_from_template", "open", "info", "set_boot_flags",
+        "generate_boot_project", "online",
         "plcopen_export", "plcopen_import", "save_as_library",
       ]),
       name: z.string().optional(),
       template: z.enum(["Standard PLC Template", "Empty PLC Template"]).optional(),
       file: z.string().optional(),
       treePath: z.string().optional(),
-      taskPath: z.string().optional(),
       subType: z.number().int().min(0).max(2).optional(),
       before: z.string().optional().describe("insert before this sibling PLC project"),
       autostart: z.boolean().optional(),
@@ -771,8 +770,6 @@ server.registerTool(
         return textResult(await bridgeCall("plc_project_open", { name: p.name, file: p.file, subType: p.subType, before: p.before, save: p.save === true }));
       case "info":
         return textResult(await bridgeCall("plc_project_info", { treePath: p.treePath }));
-      case "check":
-        return textResult(await bridgeCall("plc_project_check", { treePath: p.treePath }));
       case "set_boot_flags":
         return textResult(await bridgeCall("plc_project_boot_flags", { treePath: p.treePath, autostart: p.autostart, tmcFileCopy: p.tmcFileCopy }));
       case "generate_boot_project":
@@ -786,9 +783,6 @@ server.registerTool(
           throw new Error('Blocked. online command "' + p.command + '" changes the live runtime/IDE online state. Re-run with confirm="' + PLC_DOWNLOAD_CONFIRMATION + '" to proceed.');
         }
         return textResult(await bridgeCall("plc_project_online", { command: p.command, treePath: p.treePath }));
-      case "link_task":
-        need(p, ["treePath", "taskPath"], p.action);
-        return textResult(await bridgeCall("plc_project_link_task", { treePath: p.treePath, taskPath: p.taskPath }));
       case "plcopen_export":
         need(p, ["file"], p.action);
         return textResult(await bridgeCall("plc_project_plcopen_export", { treePath: p.treePath, file: p.file, selection: p.selection }));
@@ -1225,10 +1219,10 @@ server.registerTool(
       "create (name, by=\"classid\"|\"name\", id, before?) — CreateChild under TcCOM Objects: by=classid -> subType 0, id = module GUID/ClassID e.g. {8f5fdcff-...}; by=name -> subType 1, id = registered module type name e.g. \"NewModule\"; a malformed/ghost child is cleaned up and reported as an error. " +
       "get_xml (path) — ProduceXml of the instance (Parameters / DataAreas / Symbols, with current CreateSymbol/CreateSymbols flags). set_xml (path, xml, returnXml?) — ConsumeXml escape hatch for parameters not exposed as typed properties. " +
       "enable_symbols (path, parameters?, dataAreas?, returnXml?) — convenience toggle: sets CreateSymbol=true on Parameter nodes and/or CreateSymbols=true on DataArea AreaNo nodes via ProduceXml/ConsumeXml. CAVEAT: the XPath/attribute names are from a how-to summary, NOT verified against a literal ProduceXml dump — call get_xml on a real module first and fall back to set_xml if the toggle reports changed:false. " +
-      "link (a, b, autoResolve?) / unlink (a, b?; a alone removes all of a's links) — wire module DataArea symbols to PLC/IO/other-module variables (symbols must already exist via enable_symbols); offline edit, not guarded. " +
+      "To wire module DataArea symbols to PLC/IO/other-module variables (symbols must already exist via enable_symbols), use tc_link link/unlink. " +
       "set_context (path, taskObjectId, contextId?) — assign the instance to a task's execution context; taskObjectId/contextId are DECIMAL oids (XAE shows hex). GUARDED: changes the activated mapping/runtime context, requires confirm=\"" + MODULE_CONTEXT_CONFIRMATION + "\" and defaults to no-op.",
     inputSchema: {
-      action: z.enum(["list", "create", "get_xml", "set_xml", "enable_symbols", "set_context", "link", "unlink"]),
+      action: z.enum(["list", "create", "get_xml", "set_xml", "enable_symbols", "set_context"]),
       path: z.string().optional(),
       name: z.string().optional(),
       by: z.enum(["classid", "name"]).optional(),
@@ -1240,9 +1234,6 @@ server.registerTool(
       dataAreas: z.boolean().optional(),
       taskObjectId: z.number().int().optional().describe("decimal ObjectId of the target task (XAE shows it in hex)"),
       contextId: z.number().int().optional(),
-      a: z.string().optional(),
-      b: z.string().optional(),
-      autoResolve: z.boolean().optional(),
       confirm: z.string().optional(),
     },
   },
@@ -1265,12 +1256,6 @@ server.registerTool(
           throw new Error("enable_symbols: set parameters:true and/or dataAreas:true (nothing to do otherwise).");
         }
         return textResult(await bridgeCall("twincat_module_enable_symbols", { path: p.path, parameters: p.parameters === true, dataAreas: p.dataAreas === true, returnXml: p.returnXml === true }));
-      case "link":
-        need(p, ["a", "b"], p.action);
-        return textResult(await bridgeCall("twincat_module_link_variables", { a: p.a, b: p.b, autoResolve: p.autoResolve !== false }));
-      case "unlink":
-        need(p, ["a"], p.action);
-        return textResult(await bridgeCall("twincat_module_unlink_variables", { a: p.a, b: p.b }));
       case "set_context":
         if (p.confirm !== MODULE_CONTEXT_CONFIRMATION) {
           throw new Error('Blocked. set_context assigns the module to a task execution context, changing the activated mapping/runtime context. Re-run with confirm="' + MODULE_CONTEXT_CONFIRMATION + '" to proceed.');

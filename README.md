@@ -210,8 +210,8 @@ verbs reject the safety project (any `TISC`-rooted path is refused by
 license action is `confirm`-token gated (see "Guards" at the end of this list).
 
 - **`plc_project`** — PLC project lifecycle (§7.1). Actions: `create_from_template`,
-  `open`, `info`, `check`, `set_boot_flags`, `generate_boot_project`, `online`,
-  `link_task`, `plcopen_export`, `plcopen_import`, `save_as_library`.
+  `open`, `info`, `set_boot_flags`, `generate_boot_project`, `online`,
+  `plcopen_export`, `plcopen_import`, `save_as_library`.
   `generate_boot_project` and `online` (Login/Start/Stop/Reset) require
   `confirm="ALLOW_PLC_DOWNLOAD"` (they touch the live runtime/boot dir).
 - **`plc_pou`** — PLC object authoring + code edit (§7.3). Actions: `create`,
@@ -243,7 +243,7 @@ license action is `confirm`-token gated (see "Guards" at the end of this list).
   `list_resources`, `claim_resources`, `create_gsd_box`, `add_netvar`,
   `set_station_address`, `import_dbc`, `get_xml`, `set_xml`. Refuses TISC paths.
 - **`tc_module`** — TcCOM module objects (§9). Actions: `list`, `create`,
-  `get_xml`, `set_xml`, `enable_symbols`, `set_context`, `link`, `unlink`.
+  `get_xml`, `set_xml`, `enable_symbols`, `set_context`.
   `set_context` (changes the activated task/runtime context) requires
   `confirm="ALLOW_TWINCAT_MODULE_CONTEXT"`. Refuses TISC paths.
 - **`tc_cpp`** — TwinCAT C++ projects/modules (§10). Actions: `create_project`,

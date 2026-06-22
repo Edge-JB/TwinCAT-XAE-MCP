@@ -5,6 +5,12 @@ on real TwinCAT projects. Newest first.
 
 ---
 
+## 2026-06-22 — Dedupe round 2: removed 4 redundant alias actions — branch `feature/dedupe-overlap-actions`
+
+Dedupe round 2: removed plc_project check (use plc_pou check_objects), plc_project link_task (use tc_task set_linked_task), tc_module link/unlink (use tc_link) — each a redundant alias with a confirmed-better keeper; verified live this session. (tc_measurement node_get_xml/set_xml were removed earlier.)
+
+---
+
 ## 2026-06-22 — Renamed `createIO` → `tc_ethercat` for clarity — branch `feature/rename-tc-ethercat`
 
 `createIO` is renamed to **`tc_ethercat`** so the EtherCAT-vs-other-buses split is
