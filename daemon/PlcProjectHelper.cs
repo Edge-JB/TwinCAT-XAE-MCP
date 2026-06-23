@@ -76,6 +76,14 @@ namespace Te1000Daemon
             return typed.LinkedTask;
         }
 
+        // Typed read of ITcPlcTaskReference.LinkedTask (vtable; dynamic cannot QI).
+        // Mirrors the bridge's Te1000PlcTaskRefHelper::GetLinkedTask. Used by
+        // tc_task get_linked_task and as the feature-detect probe in set_linked_task.
+        public static string GetLinkedTask(object taskRef)
+        {
+            return ((ITcPlcTaskReference)taskRef).LinkedTask;
+        }
+
         // ITcPlcIECProject on the project INSTANCE node: PLCopen + library.
         public static void PlcOpenExport(object iecProject, string file, string selection)
         {
