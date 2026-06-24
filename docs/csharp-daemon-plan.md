@@ -1,5 +1,16 @@
 # te1000-mcp → Full Native C#/.NET Daemon — Implementation Plan
 
+> **Historical planning document.** This is the plan written *before* the port. The work is
+> now complete and merged on `feat/csharp-daemon`; a few decisions changed during
+> implementation — the authoritative description of the shipped design is
+> **[architecture.md](architecture.md)**. Notably: the daemon targets **net472** (not net48)
+> and builds with the **in-box .NET Framework MSBuild** (no SDK/NuGet); JSON is a
+> **self-contained** reader/writer (`Json.cs`), not `System.Text.Json`/Newtonsoft; the typed
+> `TCatSysManagerLib` interop is referenced (EmbedInteropTypes) for vtable-only interfaces;
+> and the worktree lives at `C:\ProgramData\te1000-mcp-daemon`. Coverage and validation
+> records are in [csharp-daemon-coverage.md](csharp-daemon-coverage.md) and
+> [csharp-daemon-validation.md](csharp-daemon-validation.md).
+
 ## Goal
 Replace the per-call `powershell.exe` spawn model with a **persistent C#/.NET daemon** that
 implements the entire te1000 action surface **natively** (no PowerShell in the hot path), driving

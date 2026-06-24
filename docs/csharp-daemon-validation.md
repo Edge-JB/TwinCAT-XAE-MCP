@@ -37,14 +37,21 @@ Otherwise it auto-falls back to the legacy PS bridge (and logs which mode it is
 in on startup, to stderr). If the daemon exe is missing or the pipe never comes
 up, a call also falls back to the legacy bridge for that call.
 
-Env knobs (all optional):
+Env knobs (all optional). The full table — what reads each one and its default — is in the
+[README](../README.md#environment-variables); the daemon-relevant ones:
 - `TE1000_NO_DAEMON=1` — force the legacy PowerShell bridge.
 - `TE1000_DAEMON_PIPE=<name>` — pipe name (default `te1000-mcp`); daemon + client must match.
+- `TE1000_DAEMON_CONNECT_MS=N` — connect/spawn wait before falling back to legacy (default 20000).
+- `TE1000_DAEMON_REQUEST_MS=N` — Node-side per-request ceiling (default 1900000; `0` disables).
+  Kept above the daemon's own ~180 s per-call ceiling so it never pre-empts a long call.
+- `TE1000_MCP_SOLUTION_PATH=<full path>` — pin the daemon to the XAE instance whose open
+  solution matches, when several are running (read by the daemon).
 - `TE1000_DIALOG_WATCH=0` — disable the internal dialog watcher thread.
 - `TE1000_DIALOG_AUTODISMISS=0` — detect+report dialogs only, never auto-click.
 - `TE1000_DIALOG_GRACE_MS=N` — how long a blocking modal must persist before the
   call is abandoned and the worker recycled (default 4000).
-- `TE1000_DAEMON_DEBUG=1` — write a daemon log to `%TEMP%\te1000-daemon-<pipe>.log`.
+- `TE1000_DAEMON_DEBUG=1` — write a daemon log to `%TEMP%\te1000-daemon-<pipe>.log`
+  (or set `TE1000_DAEMON_LOG=<path>` for an explicit location).
 
 ## Cut over the MCP to the daemon build (when you choose to)
 The safest path is to point the MCP config at the worktree's `index.js` so the
