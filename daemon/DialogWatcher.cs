@@ -75,6 +75,8 @@ namespace Te1000Daemon
             return sb.ToString();
         }
 
+        const string StdDialogClass = "#32770"; // the standard Win32 dialog-box class (MessageBox & friends)
+
         public static List<DlgWin> Find(uint pid)
         {
             var res = new List<DlgWin>();
@@ -82,26 +84,58 @@ namespace Te1000Daemon
             {
                 uint wp; GetWindowThreadProcessId(h, out wp);
                 if (wp != pid) return true;
-                if (!IsWindowVisible(h) || !IsWindowEnabled(h)) return true;
+                if (!IsWindowVisible(h)) return true;
+
+                string cls = ClassOf(h);
                 IntPtr owner = GetWindow(h, GW_OWNER);
-                if (owner == IntPtr.Zero || IsWindowEnabled(owner)) return true; // not application-modal
-                var d = new DlgWin { Hwnd = h.ToInt64(), Title = CtlText(h), Class = ClassOf(h) };
+
+                // Two shapes of blocking modal dialog must be recognized:
+                //
+                //  (1) Classic application-modal: an OWNED window whose owner is
+                //      DISABLED (the defining trait — WPF/WinForms dialogs such as
+                //      the VS "file changed outside the environment" prompt). The
+                //      dialog itself is enabled while it holds the modal loop.
+                //
+                //  (2) Standard dialog box (#32770): the MessageBox-style prompts the
+                //      TwinCAT System Manager raises — e.g. "Unrestored variables
+                //      links found", save/activate confirms. These are frequently
+                //      OWNER-LESS and do NOT disable the main window; some are even
+                //      WS_DISABLED themselves (a nested confirm can sit on top) — yet
+                //      they still block the synchronous DTE/COM call. The owner-
+                //      disabled heuristic never matches them, so match the class
+                //      directly (verified live: owner=0, self-disabled, main enabled).
+                bool ownerModal = owner != IntPtr.Zero && !IsWindowEnabled(owner);
+                bool stdDialog = cls == StdDialogClass;
+                if (!ownerModal && !stdDialog) return true;
+
+                // The classic (owner-disabled) path still requires the dialog window
+                // itself be enabled — a disabled, non-#32770 window is not the active
+                // modal. The #32770 path intentionally allows a self-disabled dialog.
+                if (ownerModal && !stdDialog && !IsWindowEnabled(h)) return true;
+
+                var d = new DlgWin { Hwnd = h.ToInt64(), Title = CtlText(h), Class = cls };
                 var body = new StringBuilder();
                 EnumChildWindows(h, (c, l2) =>
                 {
-                    string cls = ClassOf(c);
+                    string ccls = ClassOf(c);
                     string t = CtlText(c);
-                    if (cls == "Button")
+                    if (ccls == "Button")
                     {
                         if (!string.IsNullOrWhiteSpace(t)) d.Buttons.Add(t.Replace("&", "").Trim());
                     }
-                    else if (cls == "Static" || cls == "RichEdit20W" || cls.StartsWith("Edit"))
+                    else if (ccls == "Static" || ccls == "RichEdit20W" || ccls.StartsWith("Edit"))
                     {
                         if (!string.IsNullOrWhiteSpace(t)) body.Append(t.Trim() + " ");
                     }
                     return true;
                 }, IntPtr.Zero);
                 d.Text = body.ToString().Trim();
+
+                // A #32770 matched purely on class must carry real content (a button
+                // or a message) to count — guards against transient empty dialog
+                // shells. Owner-modal dialogs are trusted regardless.
+                if (stdDialog && !ownerModal && d.Buttons.Count == 0 && d.Text.Length == 0) return true;
+
                 res.Add(d);
                 return true;
             }, IntPtr.Zero);

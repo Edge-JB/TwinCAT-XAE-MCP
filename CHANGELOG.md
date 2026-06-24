@@ -4,6 +4,31 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.2] — 2026-06-24
+
+### Fixed
+- **Dialog watchdog missed owner-less `#32770` prompts** (e.g. the TwinCAT
+  System Manager's *"Unrestored variables links found"* dialog). `DlgWatch.Find`
+  only recognized a window as a modal dialog when it was *visible AND enabled AND
+  had an owner window that was disabled* — the classic application-modal trait.
+  That System-Manager prompt is a top-level standard dialog-box (`#32770`) that is
+  **owner-less**, does **not** disable the main XAE window, and is itself
+  **`WS_DISABLED`** (a nested confirm can sit on top) — so it failed every branch
+  of the heuristic and was silently skipped, leaving the blocked COM call to hang
+  or proceed unnoticed (verified live: `owner=0`, `dlgEn=False`, `mainEn=True`).
+  `Find` now ALSO matches any visible `#32770` standard dialog box regardless of
+  owner/self-enabled state (requiring real content — a button or message — to
+  guard against transient empty shells), while keeping the existing owner-disabled
+  path for WPF/WinForms modals. Mirrored in the PowerShell fallback
+  (`dialog-watch.ps1`) so both detectors stay in sync.
+
+### Added
+- **`xae dialog_probe`** — a read-only diagnostic action (COM-free daemon meta
+  action) that reports whether a modal dialog is currently blocking XAE and, if so,
+  its title / body / buttons. Never clicks anything (report-only), so it is safe to
+  run against a live cell to answer "is XAE wedged on a prompt right now, and on
+  what?". Backed by `ComWorker.Watcher` + `DialogWatcher.Probe(doDismiss:false)`.
+
 ## [2.1.1] — 2026-06-24
 
 ### Fixed

@@ -68,6 +68,10 @@ namespace Te1000Daemon
 
         public ComSession Session { get { return _session; } }
 
+        // The dialog watcher (may be null when started with --no-watch). Exposed so
+        // the Dispatcher can serve a COM-free `dialog_probe` diagnostic action.
+        public DialogWatcher Watcher { get { return _watcher; } }
+
         private void StartThread()
         {
             _queue = new BlockingCollection<WorkItem>();
