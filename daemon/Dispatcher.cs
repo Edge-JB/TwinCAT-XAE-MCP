@@ -80,10 +80,37 @@ namespace Te1000Daemon
                 resp["ok"] = true;
                 var arr = new Json.JArr();
                 foreach (var k in _handlers.Keys) arr.Add(k);
-                arr.Add("ping"); arr.Add("list_actions");
+                arr.Add("ping"); arr.Add("list_actions"); arr.Add("dialog_probe");
                 var data = new Json.JObj();
                 data["actions"] = arr;
                 data["count"] = arr.Count;
+                resp["result"] = data;
+                return resp;
+            }
+            // dialog_probe: COM-free diagnostic. Runs a one-shot window enumeration
+            // (no COM, no STA hop) and returns the current modal-dialog snapshot —
+            // the same shape the watcher feeds the grace recycle. Report-only: it
+            // never auto-dismisses (doDismiss:false), so it is safe to call against a
+            // live cell to ask "is XAE blocked on a dialog right now, and on what?".
+            if (action == "dialog_probe")
+            {
+                resp["ok"] = true;
+                var data = new Json.JObj();
+                DialogWatcher w = _worker.Watcher;
+                if (w == null)
+                {
+                    data["watching"] = false;
+                    data["found"] = false;
+                }
+                else
+                {
+                    data["watching"] = true;
+                    DialogSnapshot snap = w.Probe(false);
+                    data["snapshot"] = snap.ToJson();
+                    data["found"] = snap.Found;
+                    data["blocking"] = snap.Blocking;
+                    data["blockingForMs"] = w.BlockingForMs;
+                }
                 resp["result"] = data;
                 return resp;
             }

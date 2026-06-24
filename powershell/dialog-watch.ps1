@@ -89,27 +89,54 @@ public static class DlgWatch {
         return sb.ToString();
     }
 
+    const string StdDialogClass = "#32770"; // the standard Win32 dialog-box class (MessageBox & friends)
+
     public static List<DlgWin> Find(uint pid) {
         var res = new List<DlgWin>();
         EnumWindows((h, l) => {
             uint wp; GetWindowThreadProcessId(h, out wp);
             if (wp != pid) return true;
-            if (!IsWindowVisible(h) || !IsWindowEnabled(h)) return true;
+            if (!IsWindowVisible(h)) return true;
+
             IntPtr owner = GetWindow(h, GW_OWNER);
-            if (owner == IntPtr.Zero || IsWindowEnabled(owner)) return true; // not application-modal
-            var d = new DlgWin { Hwnd = h.ToInt64(), Title = CtlText(h), Class = ClassOf(h) };
+
+            // Two shapes of blocking modal dialog (see DialogWatcher.cs for the full
+            // rationale — keep these two implementations in sync):
+            //  (1) classic application-modal: an OWNED window whose owner is DISABLED.
+            //  (2) standard dialog box (#32770) showing the ABNORMAL trait the
+            //      owner-disabled heuristic misses: OWNER-LESS or self-WS_DISABLED
+            //      (e.g. "Unrestored variables links found"). A normal owned,
+            //      self-ENABLED #32770 is a MODELESS tool window (Find/Replace, Go To
+            //      Line) that does NOT block COM — exclude it or it spuriously trips
+            //      the grace recycle.
+            bool ownerModal = owner != IntPtr.Zero && !IsWindowEnabled(owner);
+            bool abnormal = owner == IntPtr.Zero || !IsWindowEnabled(h); // owner-less or self-disabled
+            // Skip the GetClassName P/Invoke for the many ordinary owned, enabled windows.
+            if (!ownerModal && !abnormal) return true;
+            string cls = ClassOf(h);
+            bool stdDialog = cls == StdDialogClass && abnormal;
+            if (!ownerModal && !stdDialog) return true;
+            // Classic path still requires the dialog itself be enabled; the #32770
+            // path intentionally allows a self-disabled dialog.
+            if (ownerModal && !stdDialog && !IsWindowEnabled(h)) return true;
+
+            var d = new DlgWin { Hwnd = h.ToInt64(), Title = CtlText(h), Class = cls };
             var body = new StringBuilder();
             EnumChildWindows(h, (c, l2) => {
-                string cls = ClassOf(c);
+                string ccls = ClassOf(c);
                 string t = CtlText(c);
-                if (cls == "Button") {
+                if (ccls == "Button") {
                     if (!string.IsNullOrWhiteSpace(t)) d.Buttons.Add(t.Replace("&", "").Trim());
-                } else if (cls == "Static" || cls == "RichEdit20W" || cls.StartsWith("Edit")) {
+                } else if (ccls == "Static" || ccls == "RichEdit20W" || ccls.StartsWith("Edit")) {
                     if (!string.IsNullOrWhiteSpace(t)) body.Append(t.Trim() + " ");
                 }
                 return true;
             }, IntPtr.Zero);
             d.Text = body.ToString().Trim();
+
+            // A #32770 matched purely on class must carry real content (button/message).
+            if (stdDialog && !ownerModal && d.Buttons.Count == 0 && d.Text.Length == 0) return true;
+
             res.Add(d);
             return true;
         }, IntPtr.Zero);

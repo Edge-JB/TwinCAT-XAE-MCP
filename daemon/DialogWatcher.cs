@@ -34,6 +34,8 @@ namespace Te1000Daemon
         [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "SendMessage")] static extern IntPtr SendMessageStr(IntPtr h, uint msg, IntPtr w, StringBuilder l);
         [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         static extern IntPtr SendMessageTimeout(IntPtr h, uint msg, IntPtr w, IntPtr l, uint flags, uint timeoutMs, out IntPtr result);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "SendMessageTimeoutW")]
+        static extern IntPtr SendMessageTimeoutStr(IntPtr h, uint msg, IntPtr w, StringBuilder l, uint flags, uint timeoutMs, out IntPtr result);
         [DllImport("user32.dll")] static extern int GetDlgCtrlID(IntPtr h);
 
         const uint SMTO_ABORTIFHUNG = 0x0002;
@@ -66,14 +68,23 @@ namespace Te1000Daemon
 
         // WM_GETTEXT works cross-process (the dialog's UI thread pumps the modal
         // loop and answers the message); GetWindowText does not for child controls.
+        // Uses SendMessageTimeout(SMTO_ABORTIFHUNG) — never a plain SendMessage — so a
+        // wedged XAE UI thread cannot hang the watcher poll or a dialog_probe call
+        // (a probe sold as "is XAE stuck right now?" must stay responsive when it is).
         static string CtlText(IntPtr h)
         {
-            int len = (int)SendMessage(h, WM_GETTEXTLENGTH, IntPtr.Zero, IntPtr.Zero);
+            IntPtr lenRes;
+            if (SendMessageTimeout(h, WM_GETTEXTLENGTH, IntPtr.Zero, IntPtr.Zero, SMTO_ABORTIFHUNG, ClickTimeoutMs, out lenRes) == IntPtr.Zero)
+                return ""; // timed out / hung UI thread
+            int len = (int)lenRes;
             if (len <= 0) return "";
             var sb = new StringBuilder(len + 1);
-            SendMessageStr(h, WM_GETTEXT, (IntPtr)(len + 1), sb);
+            IntPtr res;
+            SendMessageTimeoutStr(h, WM_GETTEXT, (IntPtr)(len + 1), sb, SMTO_ABORTIFHUNG, ClickTimeoutMs, out res);
             return sb.ToString();
         }
+
+        const string StdDialogClass = "#32770"; // the standard Win32 dialog-box class (MessageBox & friends)
 
         public static List<DlgWin> Find(uint pid)
         {
@@ -82,26 +93,69 @@ namespace Te1000Daemon
             {
                 uint wp; GetWindowThreadProcessId(h, out wp);
                 if (wp != pid) return true;
-                if (!IsWindowVisible(h) || !IsWindowEnabled(h)) return true;
+                if (!IsWindowVisible(h)) return true;
+
                 IntPtr owner = GetWindow(h, GW_OWNER);
-                if (owner == IntPtr.Zero || IsWindowEnabled(owner)) return true; // not application-modal
-                var d = new DlgWin { Hwnd = h.ToInt64(), Title = CtlText(h), Class = ClassOf(h) };
+
+                // Two shapes of blocking modal dialog must be recognized:
+                //
+                //  (1) Classic application-modal: an OWNED window whose owner is
+                //      DISABLED (the defining trait — WPF/WinForms dialogs such as
+                //      the VS "file changed outside the environment" prompt). The
+                //      dialog itself is enabled while it holds the modal loop.
+                //
+                //  (2) Standard dialog box (#32770) showing the ABNORMAL trait the
+                //      owner-disabled heuristic misses: OWNER-LESS or self-WS_DISABLED.
+                //      These are the MessageBox-style prompts the TwinCAT System
+                //      Manager raises — e.g. "Unrestored variables links found" — which
+                //      are owner-less, do not disable the main window, and may even be
+                //      self-disabled (a nested confirm can sit on top), yet still block
+                //      the synchronous DTE/COM call (verified live: owner=0,
+                //      self-disabled, main enabled). A normal owned, self-ENABLED #32770
+                //      is a MODELESS tool window (VS Find/Replace, Go To Line, Find
+                //      Symbol Results) that does NOT block COM — it must be EXCLUDED, or
+                //      leaving one open would spuriously trip the grace recycle and fail
+                //      unrelated commands.
+                bool ownerModal = owner != IntPtr.Zero && !IsWindowEnabled(owner);
+                bool abnormal = owner == IntPtr.Zero || !IsWindowEnabled(h); // owner-less or self-disabled
+
+                // Only an owner-modal or abnormal window can be a blocking dialog; skip
+                // the GetClassName P/Invoke for the many ordinary owned, enabled windows
+                // a VS/XAE process has (this runs every poll, for every visible window).
+                if (!ownerModal && !abnormal) return true;
+
+                string cls = ClassOf(h);
+                bool stdDialog = cls == StdDialogClass && abnormal;
+                if (!ownerModal && !stdDialog) return true;
+
+                // The classic (owner-disabled) path still requires the dialog window
+                // itself be enabled — a disabled, non-#32770 window is not the active
+                // modal. The #32770 path intentionally allows a self-disabled dialog.
+                if (ownerModal && !stdDialog && !IsWindowEnabled(h)) return true;
+
+                var d = new DlgWin { Hwnd = h.ToInt64(), Title = CtlText(h), Class = cls };
                 var body = new StringBuilder();
                 EnumChildWindows(h, (c, l2) =>
                 {
-                    string cls = ClassOf(c);
+                    string ccls = ClassOf(c);
                     string t = CtlText(c);
-                    if (cls == "Button")
+                    if (ccls == "Button")
                     {
                         if (!string.IsNullOrWhiteSpace(t)) d.Buttons.Add(t.Replace("&", "").Trim());
                     }
-                    else if (cls == "Static" || cls == "RichEdit20W" || cls.StartsWith("Edit"))
+                    else if (ccls == "Static" || ccls == "RichEdit20W" || ccls.StartsWith("Edit"))
                     {
                         if (!string.IsNullOrWhiteSpace(t)) body.Append(t.Trim() + " ");
                     }
                     return true;
                 }, IntPtr.Zero);
                 d.Text = body.ToString().Trim();
+
+                // A #32770 matched purely on class must carry real content (a button
+                // or a message) to count — guards against transient empty dialog
+                // shells. Owner-modal dialogs are trusted regardless.
+                if (stdDialog && !ownerModal && d.Buttons.Count == 0 && d.Text.Length == 0) return true;
+
                 res.Add(d);
                 return true;
             }, IntPtr.Zero);
@@ -284,6 +338,21 @@ namespace Te1000Daemon
             }
         }
 
+        // The allowlist rule whose title (and optional text) regex matches this
+        // dialog, or null. Used by Probe both to drive the auto-dismiss click and to
+        // tell the report-only path whether the dialog will be cleared automatically.
+        private DlgRule MatchRule(string title, string text)
+        {
+            foreach (var r in _rules)
+            {
+                if (string.IsNullOrEmpty(r.Match)) continue;
+                bool titleOk = Regex.IsMatch(title ?? "", r.Match, RegexOptions.IgnoreCase);
+                bool textOk = string.IsNullOrEmpty(r.TextMatch) || Regex.IsMatch(text ?? "", r.TextMatch, RegexOptions.IgnoreCase);
+                if (titleOk && textOk) return r;
+            }
+            return null;
+        }
+
         // One-shot probe (also used for a pre-flight gate). Auto-dismisses an
         // allowlisted dialog when doDismiss is true.
         public DialogSnapshot Probe(bool doDismiss)
@@ -309,32 +378,27 @@ namespace Te1000Daemon
 
             string title = dlg.Title ?? "";
             string text = dlg.Text ?? "";
+            // The allowlist rule (if any) that applies — the one the watcher Loop
+            // would auto-click. Resolved WITHOUT clicking so the report-only path can
+            // distinguish a true block from an about-to-be-auto-dismissed dialog.
+            DlgRule rule = MatchRule(title, text);
             bool dismissed = false;
             string dismissedButton = null;
 
-            if (doDismiss && _rules.Count > 0)
+            if (doDismiss && rule != null && DlgWatch.Click(dlg.Hwnd, rule.Button))
             {
-                foreach (var r in _rules)
-                {
-                    if (string.IsNullOrEmpty(r.Match)) continue;
-                    bool titleOk = Regex.IsMatch(title, r.Match, RegexOptions.IgnoreCase);
-                    bool textOk = string.IsNullOrEmpty(r.TextMatch) || Regex.IsMatch(text, r.TextMatch, RegexOptions.IgnoreCase);
-                    if (titleOk && textOk)
-                    {
-                        if (DlgWatch.Click(dlg.Hwnd, r.Button))
-                        {
-                            dismissed = true;
-                            dismissedButton = r.Button;
-                        }
-                        break;
-                    }
-                }
+                dismissed = true;
+                dismissedButton = rule.Button;
             }
 
             return new DialogSnapshot
             {
                 Found = true,
-                Blocking = !dismissed,
+                // Blocking = present AND not going to clear on its own. When dismissing,
+                // a still-blocking result means the click failed. When only reporting
+                // (doDismiss:false), a dialog that matches an allowlist rule is NOT a
+                // persistent block — the watcher Loop will dismiss it — so don't flag it.
+                Blocking = doDismiss ? !dismissed : (rule == null),
                 Dismissed = dismissed,
                 DismissedButton = dismissedButton,
                 Title = title,

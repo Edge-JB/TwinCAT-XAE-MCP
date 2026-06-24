@@ -4,6 +4,40 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.2] — 2026-06-24
+
+### Fixed
+- **Dialog watchdog missed owner-less `#32770` prompts** (e.g. the TwinCAT
+  System Manager's *"Unrestored variables links found"* dialog). `DlgWatch.Find`
+  only recognized a window as a modal dialog when it was *visible AND enabled AND
+  had an owner window that was disabled* — the classic application-modal trait.
+  That System-Manager prompt is a top-level standard dialog-box (`#32770`) that is
+  **owner-less**, does **not** disable the main XAE window, and is itself
+  **`WS_DISABLED`** (a nested confirm can sit on top) — so it failed every branch
+  of the heuristic and was silently skipped, leaving the blocked COM call to hang
+  or proceed unnoticed (verified live: `owner=0`, `dlgEn=False`, `mainEn=True`).
+  `Find` now ALSO matches a visible `#32770` standard dialog box that shows the
+  **abnormal** modal trait the owner-disabled heuristic misses — **owner-less or
+  self-`WS_DISABLED`** — requiring real content (a button or message) to guard
+  against transient empty shells. A normal owned, self-**enabled** `#32770` is a
+  *modeless* tool window (Find/Replace, Go To Line, Find Symbol Results) and is
+  deliberately **excluded**, so leaving one open no longer spuriously trips the
+  grace recycle and fails unrelated commands. The existing owner-disabled path for
+  WPF/WinForms modals is unchanged. Mirrored in the PowerShell `dialog-watch.ps1`
+  so both detectors stay in sync. The cross-process window-text reads in `Find`
+  now use `SendMessageTimeout(SMTO_ABORTIFHUNG)` so a wedged XAE UI thread can
+  never hang the watcher poll or a `dialog_probe` call.
+
+### Added
+- **`xae dialog_probe`** — a read-only diagnostic action (COM-free daemon meta
+  action) that reports whether a modal dialog is currently blocking XAE and, if so,
+  its title / body / buttons. Never clicks anything (report-only), so it is safe to
+  run against a live cell to answer "is XAE wedged on a prompt right now, and on
+  what?". Backed by `ComWorker.Watcher` + `DialogWatcher.Probe(doDismiss:false)`.
+  In report-only mode `blocking` reflects whether the dialog would persist — a
+  dialog matching an auto-dismiss allowlist rule reports `blocking:false`, since
+  the watcher will clear it — so the probe does not cry wolf on allowlisted prompts.
+
 ## [2.1.1] — 2026-06-24
 
 ### Fixed

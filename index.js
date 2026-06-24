@@ -357,6 +357,22 @@ function prune(v) {
 
 function textResult(data) {
   if (data && typeof data === "object") {
+    if ("watching" in data && "found" in data) {
+      if (!data.watching) return text("dialog watcher is disabled (daemon started with --no-watch)");
+      if (!data.found) return text("no modal dialog open in XAE");
+      const s = data.snapshot || {};
+      const buttons = Array.isArray(s.buttons) ? s.buttons.join(", ") : "";
+      return text(
+        [
+          `modal dialog ${data.blocking ? "BLOCKING" : "present"}${data.blockingForMs ? ` (open ${data.blockingForMs} ms)` : ""}`,
+          `title:   ${s.title || ""}`,
+          s.text ? `text:    ${s.text}` : null,
+          `class:   ${s.class || ""}`,
+          buttons ? `buttons: ${buttons}` : null,
+          s.dismissed ? `dismissed via: ${s.dismissedButton}` : null,
+        ].filter(Boolean).join("\n"),
+      );
+    }
     if (typeof data.xml === "string") return text(data.xml); // raw XML beats JSON-escaped XML
     if (Array.isArray(data.commands)) return text(`${data.count} commands\n${data.commands.join("\n")}`);
     if (Array.isArray(data.items) && "available" in data) {
@@ -376,7 +392,7 @@ function need(params, keys, action) {
   }
 }
 
-const server = new McpServer({ name: "te1000-mcp", version: "2.1.1" });
+const server = new McpServer({ name: "te1000-mcp", version: "2.1.2" });
 
 server.registerTool(
   "xae",
