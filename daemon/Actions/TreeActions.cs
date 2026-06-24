@@ -541,6 +541,7 @@ namespace Te1000Daemon
 
             AssertWellFormedChild(parent, child, childName, subType, parentPath);
             ctx.Cache.Invalidate(parentPath);
+            ctx.Cache.InvalidateEnum(); // structural: tree membership changed
 
             var data = new Json.JObj();
             data["parentPath"] = parentPath;
@@ -560,6 +561,7 @@ namespace Te1000Daemon
             dynamic parent = ComHelpers.GetTreeItem(sm, parentPath);
             parent.DeleteChild(childName);
             ctx.Cache.Invalidate(parentPath);
+            ctx.Cache.InvalidateEnum(); // structural: tree membership changed
 
             var data = new Json.JObj();
             data["parentPath"] = parentPath;
@@ -611,6 +613,7 @@ namespace Te1000Daemon
                     dynamic child = parent.CreateChild(entryName, entrySubType, entryBefore, entryCreateInfo);
                     AssertWellFormedChild(parent, child, entryName, entrySubType, entryParent);
                     ctx.Cache.Invalidate(entryParent);
+                    ctx.Cache.InvalidateEnum(); // structural: tree membership changed
                     succeeded++;
                     var r = new Json.JObj();
                     r["parent"] = entryParent;
@@ -726,6 +729,7 @@ namespace Te1000Daemon
                     dynamic parent = ComHelpers.GetTreeItem(sm, entryParent);
                     parent.DeleteChild(entryName);
                     ctx.Cache.Invalidate(entryParent);
+                    ctx.Cache.InvalidateEnum(); // structural: tree membership changed
                     succeeded++;
                     var r = new Json.JObj();
                     r["parent"] = entryParent;
@@ -779,6 +783,7 @@ namespace Te1000Daemon
             dynamic parent = ComHelpers.GetTreeItem(sm, parentPath);
             dynamic child = parent.ImportChild(filePath, beforeChildName, reconnect, importAsName);
             ctx.Cache.Invalidate(parentPath);
+            ctx.Cache.InvalidateEnum(); // structural: imported objects changed membership
 
             var data = new Json.JObj();
             data["parentPath"] = parentPath;
@@ -969,6 +974,7 @@ namespace Te1000Daemon
             dynamic item = ComHelpers.GetTreeItem(sm, treePath);
             item.ConsumeXml(xml);
             ctx.Cache.Invalidate(treePath);
+            ctx.Cache.InvalidateEnum(); // structural: rescan regenerates PLC project membership
 
             var data = new Json.JObj();
             data["treePath"] = treePath;
@@ -1005,6 +1011,7 @@ namespace Te1000Daemon
             dynamic item = ComHelpers.GetTreeItem(sm, targetPath);
             ComHelpers.ConsumeXml(item, xml);
             ctx.Cache.Invalidate(targetPath);
+            ctx.Cache.InvalidateEnum(); // structural: a ConsumeXml set can rename/move tree members
             return item;
         }
 
@@ -1021,6 +1028,7 @@ namespace Te1000Daemon
             ComHelpers.ConsumeXml(item, xml);
 
             ctx.Cache.Invalidate(targetPath);
+            ctx.Cache.InvalidateEnum(); // structural: rename changes path/leaf membership
             return ComHelpers.SafeStr(delegate { return item.PathName; });
         }
 

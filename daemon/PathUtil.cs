@@ -13,7 +13,11 @@ namespace Te1000Daemon
         public static void AssertNotSafetyPath(string path)
         {
             if (string.IsNullOrWhiteSpace(path)) return;
-            if (Regex.IsMatch(path, @"^\s*TISC(\^|$)"))
+            // Case-INSENSITIVE: the PS bridge used `-match` (case-insensitive by
+            // default) and TwinCAT resolves tree-root tokens case-insensitively,
+            // so a lowercase/mixed-case `tisc^...` must be rejected too — otherwise
+            // it would slip past this guard and reach the EL6910 safety project.
+            if (Regex.IsMatch(path, @"^\s*TISC(\^|$)", RegexOptions.IgnoreCase))
             {
                 throw new BridgeException(
                     "Refused: '" + path + "' targets the TISC safety project. plc_pou must not author toward the safety system (project policy: nothing writes toward safety).");

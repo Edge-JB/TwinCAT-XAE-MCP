@@ -241,7 +241,10 @@ namespace Te1000Daemon
             // Safety policy: never address the TISC safety project. Mirrors the PS
             // regex ^\s*TISC(\^|$).
             string trimmed = treePath.TrimStart();
-            if (trimmed == "TISC" || trimmed.StartsWith("TISC^"))
+            // Case-INSENSITIVE to match the PS bridge and TwinCAT's case-insensitive
+            // tree-root resolution (a lowercase `tisc^...` must be refused too).
+            if (string.Equals(trimmed, "TISC", StringComparison.OrdinalIgnoreCase)
+                || trimmed.StartsWith("TISC^", StringComparison.OrdinalIgnoreCase))
             {
                 throw new BridgeException("Refused: variant operations on the safety project (TISC) are disallowed by policy.");
             }
