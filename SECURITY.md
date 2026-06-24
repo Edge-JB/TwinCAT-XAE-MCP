@@ -43,7 +43,7 @@ following are in scope because they undermine the project's safety model:
 
 - A way to perform a **live-target, destructive, or licensing action** (activate, restart,
   download, deletes, license writes) **without the required `confirm` token**, or to bypass the
-  guard enforcement in either `index.js` **or** `powershell/te1000-bridge.ps1`.
+  guard enforcement in either `index.js` **or** the native daemon (`daemon/`).
 - A path that lets a tool **write toward the safety project** (any `TISC`-rooted path) despite
   `Assert-NotSafetyPath`.
 - A way to make the **dialog watchdog auto-answer** a prompt it must never auto-answer (Activate

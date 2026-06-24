@@ -9,7 +9,7 @@ using System.Threading;
 
 namespace Te1000Daemon
 {
-    // ---- DlgWin / DlgWatch: lifted VERBATIM from dialog-watch.ps1 L46-141 ----
+    // ---- DlgWin / DlgWatch: native C# dialog watchdog ----
     public sealed class DlgWin
     {
         public long Hwnd;

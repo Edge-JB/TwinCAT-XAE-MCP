@@ -4,6 +4,28 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] — 2026-06-24
+
+### Removed
+- **Legacy PowerShell COM bridge fallback removed.** Deleted
+  `powershell/te1000-bridge.ps1`, `powershell/dialog-watch.ps1`, and the
+  `powershell/test-code-engine*.ps1` probes. The native C# daemon
+  (`Te1000Daemon.exe`) is now the **sole backend**; it requires a 64-bit
+  TcXaeShell.
+- **`TE1000_NO_DAEMON` env knob removed**, along with the `index.js` per-call
+  legacy dialog gate/watcher spawn. There is no longer a non-daemon mode and no
+  per-call PowerShell preflight — the daemon's internal `DialogWatcher.cs` thread
+  handles modal dialogs in-process for every call.
+
+### Changed
+- **`dialog-allowlist.json` moved from `powershell/` to the repo root.** It is
+  still read by the daemon's dialog watcher (same schema, same behavior); only the
+  path changed.
+
+> `powershell/plc-session.ps1` (the UI-Automation PLC-logout helper used by
+> `plc_session` / `plc_download` auto-logout) and `daemon/build.ps1` (the daemon
+> build script) are **retained**.
+
 ## [2.1.2] — 2026-06-24
 
 ### Fixed
@@ -186,6 +208,7 @@ nearly the entire automatable TE1000 surface.
   `ProduceXml`/`ConsumeXml`, variable linking, NetId targeting, rescans, NC inspection, and
   guarded activate/restart/download.
 
+[2.2.0]: https://github.com/Edge-JB/TwinCAT-XAE-MCP/releases/tag/v2.2.0
 [2.1.0]: https://github.com/Edge-JB/TwinCAT-XAE-MCP/releases/tag/v2.1.0
 [2.0.0]: https://github.com/Edge-JB/TwinCAT-XAE-MCP/releases
 [1.0.0]: https://github.com/Edge-JB/TwinCAT-XAE-MCP/releases

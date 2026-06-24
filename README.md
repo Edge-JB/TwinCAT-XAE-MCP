@@ -20,8 +20,8 @@ a TwinCAT project the same way an engineer would in the GUI.
 
 A Node MCP front (`index.js`) owns the MCP protocol, tool schemas, and confirmation
 guards; the COM/DTE work runs in a **persistent native C#/.NET daemon**
-(`Te1000Daemon.exe`) that the front talks to over a Windows named pipe. A legacy
-PowerShell bridge is retained as an automatic fallback. See [How it works](#how-it-works).
+(`Te1000Daemon.exe`) that the front talks to over a Windows named pipe. The daemon is
+the sole backend. See [How it works](#how-it-works).
 
 > [!IMPORTANT]
 > This server drives a **real engineering tool** and can deploy to a **live PLC**.
@@ -70,7 +70,7 @@ PowerShell bridge is retained as an automatic fallback. See [How it works](#how-
   modal dialogs that would otherwise hang a synchronous COM call forever.
 - **Persistent native daemon** — a long-lived C#/.NET daemon holds the COM session and
   caches the project tree and POU source text, so warm `plc_pou search` runs roughly
-  **500× faster** than the old per-call spawn model. The legacy bridge stays as a fallback.
+  **500× faster** than the old per-call spawn model.
 
 ## How it works
 
@@ -82,10 +82,6 @@ PowerShell bridge is retained as an automatic fallback. See [How it works](#how-
    (Node 20)  named pipe     (persistent, x64,            running TwinCAT project
    daemonClient.js           net472, STA COM session)
    toolSchemas.js
-        │
-        └─ fallback: 32-bit/64-bit Windows PowerShell ─► powershell/te1000-bridge.ps1 ─► XAE
-           (legacy per-call spawn; used when TE1000_NO_DAEMON=1, no x64 shell,
-            or the daemon can't start / isn't reachable)
 ```
 
 Two cooperating processes:
@@ -93,7 +89,7 @@ Two cooperating processes:
 - **Node MCP front (`index.js`)** — speaks MCP/JSON-RPC over stdio, validates input with
   [zod](https://zod.dev), single-sources every tool's input schema from `toolSchemas.js`,
   enforces the confirmation-token guards, and maps each tool `action` onto a fine-grained
-  bridge action name. By default it routes those actions to the daemon over a named pipe
+  bridge action name. It routes those actions to the daemon over a named pipe
   (`daemonClient.js`).
 - **Native daemon (`daemon/Te1000Daemon.exe`)** — a persistent net472/x64 process that
   acquires the DTE + `ITcSysManager` **once** and keeps them, runs the dialog watchdog on
@@ -119,14 +115,14 @@ daemon also answers two COM-free meta actions used for health checks: `ping` and
 
 ### Why a daemon — the performance win
 
-The old model spawned a fresh 32-bit `powershell.exe` bridge (plus a second watcher
+An earlier model spawned a fresh 32-bit `powershell.exe` bridge (plus a second watcher
 process) on **every** call. Each spawn re-acquired the DTE/`ITcSysManager` COM handles
 (a Running-Object-Table walk + `Marshal.GetActiveObject`), JIT-compiled the inline
 `Add-Type` Win32 helpers, and — for `plc_pou.find`/`search` — re-walked the entire
 project tree from the root (`O(tree-size)`, ~2,900 COM round-trips on a full project),
 so latency grew with project size.
 
-The daemon removes all of that from the hot path:
+The persistent daemon removes all of that from the hot path:
 
 - **Persistent COM session** (`ComSession.cs`) — the DTE + sysmanager are acquired once,
   health-checked with a cheap property read, and transparently reconnected if stale.
@@ -139,24 +135,8 @@ The daemon removes all of that from the hot path:
 - **Internal dialog watcher** (`DialogWatcher.cs`) — runs on its own thread, so there is
   no per-call watcher process. See [Reliability](#reliability-dialog-watchdog--plc-session-control).
 
-### Legacy PowerShell bridge (fallback)
-
-The PowerShell bridge (`powershell/te1000-bridge.ps1`) is **retained unchanged** as a
-full fallback. It attaches to the running XAE Shell via its COM ProgID and calls the same
-Automation Interface (`ITcSysManager`, `ITcSmTreeItem`, `ITcPlcProject`, DTE
-`SolutionBuild`, …). The front uses it instead of the daemon when:
-
-- `TE1000_NO_DAEMON=1` is set; **or**
-- no 64-bit TcXaeShell is detected (the daemon requires the x64 shell — DTE.17.0); **or**
-- the daemon exe is missing, can't start, or stops responding (the first such failure
-  *latches* the front to the legacy bridge for the rest of the process so subsequent
-  calls don't re-pay the connect timeout).
-
-In legacy mode the front spawns the bridge per call (64-bit PowerShell for the x64 shell,
-SysWOW64 32-bit PowerShell for a legacy 32-bit DTE.15.0 shell) and runs a separate
-dialog-watch + pre-flight gate alongside it.
-
 Build the daemon with `daemon/build.ps1` (in-box .NET Framework MSBuild — no SDK/NuGet).
+The daemon requires the **64-bit** TcXaeShell (DTE.17.0).
 See **[docs/architecture.md](docs/architecture.md)** for the end-to-end design and
 **[docs/csharp-daemon-validation.md](docs/csharp-daemon-validation.md)** for the
 build/cut-over/validation guide.
@@ -169,16 +149,15 @@ build/cut-over/validation guide.
 | **TwinCAT** | TwinCAT 3 XAE Shell / XAE installed, with the TE1000 Automation Interface |
 | **Node.js** | 20 or newer (the MCP front; the daemon does not remove the Node dependency) |
 | **A running XAE Shell** | the server attaches to an already-open instance (it does not launch XAE) |
-| **Daemon (default path)** | the **64-bit** TcXaeShell, a .NET Framework 4.x install (for the in-box MSBuild + net472 runtime), and `TCatSysManagerLib.dll` (ships with TwinCAT) |
-| **Legacy bridge (fallback)** | Windows PowerShell — 64-bit at `System32\WindowsPowerShell\v1.0\powershell.exe` for the x64 shell, or 32-bit at `SysWOW64\…` for a legacy DTE.15.0 shell |
+| **Daemon (required backend)** | the **64-bit** TcXaeShell, a .NET Framework 4.x install (for the in-box MSBuild + net472 runtime), and `TCatSysManagerLib.dll` (ships with TwinCAT) |
 
 The XAE ProgID defaults to `TcXaeShell.DTE.17.0`. Override it with the `TE1000_PROGID`
 environment variable if your installation differs.
 
 The daemon is **not** auto-built — build it once with `daemon/build.ps1` (see
 [Build the daemon](#build-the-daemon)); thereafter the MCP front auto-spawns the prebuilt
-`Te1000Daemon.exe` on first use. If the exe is absent, the front falls back to the legacy
-PowerShell bridge and logs that it did so.
+`Te1000Daemon.exe` on first use. If the exe is absent, build it before the front can serve
+calls.
 
 ## Install
 
@@ -200,7 +179,7 @@ hand. Running it directly just waits for a client on stdin.
 
 ## Build the daemon
 
-The default (fast) path uses the native daemon, which you build **once**:
+The native daemon is the backend, which you build **once**:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File daemon\build.ps1
@@ -227,8 +206,6 @@ powershell -ExecutionPolicy Bypass -File daemon\build.ps1
 > [!NOTE]
 > The running daemon **locks** `Te1000Daemon.exe`. To rebuild after a code change, stop any
 > running instance first: `Get-Process Te1000Daemon | Stop-Process`.
-
-To skip the daemon entirely (pure legacy bridge), set `TE1000_NO_DAEMON=1`.
 
 ## Configure your MCP client
 
@@ -257,16 +234,13 @@ the second by the native daemon process. Defaults are from the source.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `TE1000_NO_DAEMON` | unset | `1` forces the legacy PowerShell bridge and never starts the daemon. |
-| `TE1000_PROGID` | `TcXaeShell.DTE.17.0` | XAE Shell COM ProgID to attach to (passed through to bridge/daemon as `progId`). |
+| `TE1000_PROGID` | `TcXaeShell.DTE.17.0` | XAE Shell COM ProgID to attach to (passed through to the daemon as `progId`). |
 | `TE1000_DAEMON_PIPE` | `te1000-mcp` | Named-pipe name. The front and the daemon it spawns share this, so a custom value applies to both. |
-| `TE1000_DAEMON_CONNECT_MS` | `20000` | How long the client waits to connect to (and, if needed, spawn) the daemon before falling back to the legacy bridge. |
-| `TE1000_DAEMON_REQUEST_MS` | `1900000` | Node-side per-request ceiling: if no matching response arrives, the request is failed (and falls back to legacy). Set comfortably above the daemon's own ~180 s ceiling so it never pre-empts a legitimately long call. `0` disables it. |
-| `TE1000_BRIDGE_TIMEOUT_MS` | `0` (off) | Legacy-bridge wall-clock backstop for non-dialog hangs. Off by default so long builds are never killed. (Legacy path only.) |
-| `TE1000_DIALOG_WATCH` | on | `0` disables the modal-dialog watchdog (both the daemon's internal watcher and the legacy per-call watcher). |
+| `TE1000_DAEMON_CONNECT_MS` | `20000` | How long the client waits to connect to (and, if needed, spawn) the daemon before failing the request. |
+| `TE1000_DAEMON_REQUEST_MS` | `1900000` | Node-side per-request ceiling: if no matching response arrives, the request is failed. Set comfortably above the daemon's own ~180 s ceiling so it never pre-empts a legitimately long call. `0` disables it. |
+| `TE1000_DIALOG_WATCH` | on | `0` disables the daemon's internal modal-dialog watchdog. |
 | `TE1000_DIALOG_AUTODISMISS` | on | `0` = detect + report dialogs only, never auto-click an allowlisted one. |
-| `TE1000_DIALOG_GRACE_MS` | `4000` | How long a blocking dialog must persist before the call is abandoned (legacy) / the daemon recycles its COM worker. |
-| `WINDIR` | `C:\Windows` | Standard Windows variable; used only to locate `powershell.exe` for the legacy bridge. |
+| `TE1000_DIALOG_GRACE_MS` | `4000` | How long a blocking dialog must persist before the daemon recycles its COM worker. |
 
 **Read by the daemon:**
 
@@ -404,18 +378,16 @@ A synchronous DTE/COM call blocks inside XAE's modal message loop if XAE raises 
 dialog (save-changes, "file changed externally", activate confirm, license prompt) — which
 would hang the MCP call and the calling agent indefinitely.
 
-- **Dialog watchdog.** In daemon mode this runs as an **internal thread**
+- **Dialog watchdog.** This runs as an **internal thread** of the daemon
   (`DialogWatcher.cs`) that polls (~750 ms) for an application-modal dialog owned by the XAE
-  process; in legacy mode it is the per-call `powershell/dialog-watch.ps1` process plus a
-  pre-flight gate. Either way it detects application-modal dialogs owned by XAE and either
-  **auto-dismisses** them (if they match a rule in `powershell/dialog-allowlist.json`, which
-  the daemon reads too) or **reports** the dialog's title, body, and buttons back to the agent
-  and abandons the call. If a non-allowlisted modal persists past `TE1000_DIALOG_GRACE_MS`,
-  the daemon recycles its COM worker thread (re-acquiring the session on a fresh STA thread)
-  **without** killing the daemon, so subsequent calls recover once the dialog is cleared.
-  Detection is dialog-driven, not a wall-clock timeout, so long legitimate builds are never
-  killed. The allowlist ships minimal and must never auto-answer Activate / Run-mode /
-  restart / download / safety prompts.
+  process. It detects application-modal dialogs owned by XAE and either
+  **auto-dismisses** them (if they match a rule in `dialog-allowlist.json`) or **reports** the
+  dialog's title, body, and buttons back to the agent and abandons the call. If a
+  non-allowlisted modal persists past `TE1000_DIALOG_GRACE_MS`, the daemon recycles its COM
+  worker thread (re-acquiring the session on a fresh STA thread) **without** killing the
+  daemon, so subsequent calls recover once the dialog is cleared. Detection is dialog-driven,
+  not a wall-clock timeout, so long legitimate builds are never killed. The allowlist ships
+  minimal and must never auto-answer Activate / Run-mode / restart / download / safety prompts.
 - **PLC session control** (`powershell/plc-session.ps1`) uses UI Automation to read and toggle
   the Login/Logout state (the DTE Login/Logout commands are unreachable on the 64-bit shell).
   `plc_download` auto-logs-out first (by default) so deferred source edits compile before the
@@ -425,24 +397,20 @@ Full details: **[docs/operations.md](docs/operations.md)**.
 
 ## Troubleshooting
 
-- **Which mode am I in?** On startup the front logs `native daemon mode` or
-  `legacy PowerShell bridge mode` to stderr (with the reason — `TE1000_NO_DAEMON=1` or
-  `no x64 shell detected`). A run-time fallback also logs
-  `daemon unavailable, latching to legacy PS bridge`.
-- **`Te1000Daemon.exe not found`** — build it: `daemon\build.ps1`. Until then the front uses
-  the legacy bridge automatically.
+- **`Te1000Daemon.exe not found`** — build it: `daemon\build.ps1`. The front cannot serve
+  calls until the daemon is built.
 - **Build fails on `TCatSysManagerLib`** — the DLL wasn't found at the probed TwinCAT paths.
   Edit the `<HintPath>` in `daemon/Te1000Daemon.csproj` to your install and rebuild.
 - **Rebuild fails with the exe locked** — a daemon is still running. Stop it first:
   `Get-Process Te1000Daemon | Stop-Process`, then rebuild.
 - **Daemon won't start / stale behavior** — kill it (above) and let the front re-spawn a fresh
-  one on the next call, or set `TE1000_NO_DAEMON=1` to bypass it. Enable
-  `TE1000_DAEMON_DEBUG=1` to capture `%TEMP%\te1000-daemon-<pipe>.log`.
+  one on the next call. Enable `TE1000_DAEMON_DEBUG=1` to capture
+  `%TEMP%\te1000-daemon-<pipe>.log`.
 - **Wrong XAE instance picked** (several open) — set `TE1000_MCP_SOLUTION_PATH` to the
   solution's full path to pin the daemon to that instance.
 - **A modal dialog is blocking calls** — clear it on the machine, or add a rule to
-  `powershell/dialog-allowlist.json` (never for Activate / restart / download / safety
-  prompts). The daemon picks up the allowlist on start.
+  `dialog-allowlist.json` (never for Activate / restart / download / safety prompts). The
+  daemon picks up the allowlist on start.
 
 ## Examples
 
@@ -457,7 +425,7 @@ The [`examples/`](examples/) directory contains:
 
 | Document | What's in it |
 |---|---|
-| [docs/architecture.md](docs/architecture.md) | The Node-front + persistent C#/.NET daemon design end to end — pipe protocol, COM session, caching, edit-watching, the legacy-bridge fallback |
+| [docs/architecture.md](docs/architecture.md) | The Node-front + persistent C#/.NET daemon design end to end — pipe protocol, COM session, caching, edit-watching |
 | [docs/tools.md](docs/tools.md) | Complete tool & action reference — signatures, batch semantics, return shapes |
 | [docs/operations.md](docs/operations.md) | Dialog watchdog, PLC session control, and the safety/guard model in depth |
 | [docs/automation-interface.md](docs/automation-interface.md) | Survey of the full TE1000 Automation Interface surface (the menu these tools are carved from) |
