@@ -98,18 +98,23 @@ public static class DlgWatch {
             if (wp != pid) return true;
             if (!IsWindowVisible(h)) return true;
 
-            string cls = ClassOf(h);
             IntPtr owner = GetWindow(h, GW_OWNER);
 
             // Two shapes of blocking modal dialog (see DialogWatcher.cs for the full
             // rationale — keep these two implementations in sync):
             //  (1) classic application-modal: an OWNED window whose owner is DISABLED.
-            //  (2) standard dialog box (#32770): MessageBox-style TwinCAT prompts
-            //      (e.g. "Unrestored variables links found") that are OWNER-LESS, do
-            //      not disable the main window, and may even be self-disabled — yet
-            //      still block the synchronous COM call.
+            //  (2) standard dialog box (#32770) showing the ABNORMAL trait the
+            //      owner-disabled heuristic misses: OWNER-LESS or self-WS_DISABLED
+            //      (e.g. "Unrestored variables links found"). A normal owned,
+            //      self-ENABLED #32770 is a MODELESS tool window (Find/Replace, Go To
+            //      Line) that does NOT block COM — exclude it or it spuriously trips
+            //      the grace recycle.
             bool ownerModal = owner != IntPtr.Zero && !IsWindowEnabled(owner);
-            bool stdDialog = cls == StdDialogClass;
+            bool abnormal = owner == IntPtr.Zero || !IsWindowEnabled(h); // owner-less or self-disabled
+            // Skip the GetClassName P/Invoke for the many ordinary owned, enabled windows.
+            if (!ownerModal && !abnormal) return true;
+            string cls = ClassOf(h);
+            bool stdDialog = cls == StdDialogClass && abnormal;
             if (!ownerModal && !stdDialog) return true;
             // Classic path still requires the dialog itself be enabled; the #32770
             // path intentionally allows a self-disabled dialog.

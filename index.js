@@ -357,14 +357,14 @@ function prune(v) {
 
 function textResult(data) {
   if (data && typeof data === "object") {
-    if ("watching" in data && ("found" in data || "snapshot" in data)) {
+    if ("watching" in data && "found" in data) {
       if (!data.watching) return text("dialog watcher is disabled (daemon started with --no-watch)");
       if (!data.found) return text("no modal dialog open in XAE");
       const s = data.snapshot || {};
       const buttons = Array.isArray(s.buttons) ? s.buttons.join(", ") : "";
       return text(
         [
-          `modal dialog ${data.blocking ? "BLOCKING" : "present"} (open ${data.blockingForMs ?? 0} ms)`,
+          `modal dialog ${data.blocking ? "BLOCKING" : "present"}${data.blockingForMs ? ` (open ${data.blockingForMs} ms)` : ""}`,
           `title:   ${s.title || ""}`,
           s.text ? `text:    ${s.text}` : null,
           `class:   ${s.class || ""}`,
