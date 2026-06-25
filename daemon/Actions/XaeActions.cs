@@ -486,13 +486,15 @@ namespace Te1000Daemon
 
         // R6: ErrorLevel serializes as the strings "vsBuildErrorLevelHigh"/"Medium"/
         // "Low" (High = error, Medium = warning, Low = message) — NOT "Error". Match
-        // on "High" so an errors-only filter actually catches errors.
+        // on the substring so each filter maps to exactly one documented severity:
+        // errors -> High, warnings -> Medium. Low (message) rows show only under 'all'
+        // (folding them into 'warnings' would inflate the warning count).
         private static bool SeverityMatches(string level, string filter)
         {
             if (string.IsNullOrEmpty(filter) || filter == "all") return true;
-            bool isError = level != null && level.IndexOf("High", StringComparison.OrdinalIgnoreCase) >= 0;
-            if (filter == "errors") return isError;
-            if (filter == "warnings") return !isError; // Medium (warning) + Low (message)
+            if (level == null) return false;
+            if (filter == "errors") return level.IndexOf("High", StringComparison.OrdinalIgnoreCase) >= 0;
+            if (filter == "warnings") return level.IndexOf("Medium", StringComparison.OrdinalIgnoreCase) >= 0;
             return true;
         }
 
@@ -523,13 +525,16 @@ namespace Te1000Daemon
                 EnvDTE80.ErrorItems errorItems = errorList.ErrorItems;
                 int rawCount = errorItems.Count;
 
-                // R6: walk ALL items, apply the severity filter first, count every
-                // match (matchedTotal), but only collect up to `limit` rows. This
-                // makes count reflect the true matching total while capping payload.
+                // R6: with a severity filter active, walk ALL items so `count` reflects
+                // the true matching total (one COM ErrorLevel read per item). Without a
+                // filter the total IS rawCount, so stop collecting at `limit` and skip
+                // the full walk — keeps the common build-flood path bounded (R7).
+                bool filtering = !(string.IsNullOrEmpty(severityFilter) || severityFilter == "all");
                 int matchedTotal = 0;
                 var items = new Json.JArr();
                 for (int i = 1; i <= rawCount; i++)
                 {
+                    if (!filtering && items.Count >= limit) break; // total is rawCount; no need to walk on
                     EnvDTE80.ErrorItem item = errorItems.Item(i);
                     string level = ComHelpers.SafeStr(delegate() { return item.ErrorLevel; });
                     if (!SeverityMatches(level, severityFilter)) continue;
@@ -546,7 +551,7 @@ namespace Te1000Daemon
                 }
 
                 ErrorListResult result = new ErrorListResult();
-                result.TotalCount = matchedTotal;
+                result.TotalCount = filtering ? matchedTotal : rawCount;
                 result.Items = items;
                 return result;
             }

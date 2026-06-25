@@ -141,7 +141,7 @@ namespace Te1000Daemon
 
             SaveIfRequested(ctx);
             ctx.Cache.Clear();
-            return BatchRollup(ctx, creates.Count, succeeded, failed, results);
+            return BatchRollup(ctx, creates.Count, succeeded, failed, results, keepSuccessRows: true);
         }
 
         // plc_pou_create_folder (L6049-6063)
@@ -201,7 +201,7 @@ namespace Te1000Daemon
 
             SaveIfRequested(ctx);
             ctx.Cache.Clear();
-            return BatchRollup(ctx, creates.Count, succeeded, failed, results);
+            return BatchRollup(ctx, creates.Count, succeeded, failed, results, keepSuccessRows: true);
         }
 
         // plc_pou_import_template (L6105-6160). BUG FIX: the PS path-array build
@@ -1276,16 +1276,20 @@ namespace Te1000Daemon
         // ===== private helpers ==============================================
         // ====================================================================
 
-        private static Json.JObj BatchRollup(ActionContext ctx, int count, int succeeded, int failed, Json.JArr results)
+        private static Json.JObj BatchRollup(ActionContext ctx, int count, int succeeded, int failed, Json.JArr results, bool keepSuccessRows = false)
         {
             var data = new Json.JObj();
             data["count"] = count;
             data["succeeded"] = succeeded;
             data["failed"] = failed;
             // Failures-only by default to drop the per-entry ok:true echo (the silent
-            // write-op token tax). details:true restores every row (create_batch
-            // ok-rows carry child identity). count/succeeded/failed always reported.
-            data["results"] = FilterBatchRows(results, ctx.Payload);
+            // write-op token tax) for the echo-only batches (set_decl/set_impl).
+            // create_batch/create_folder_batch pass keepSuccessRows:true because their
+            // ok-rows carry the AUTHORITATIVE created child identity (child.pathName,
+            // which TwinCAT may auto-suffix) — dropping it would force the caller to
+            // guess parent^name and silently hit "item not found" on a follow-up edit.
+            // count/succeeded/failed always reported.
+            data["results"] = keepSuccessRows ? results : FilterBatchRows(results, ctx.Payload);
             return data;
         }
 

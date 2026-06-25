@@ -105,7 +105,11 @@ function prune(v) {
 
 function textResult(data) {
   if (data && typeof data === "object") {
-    if ("resolved" in data && ("clicked" in data || data.resolved === false)) {
+    // dialog_resolve results: acted -> carries `clicked`; no-dialog -> carries `reason`.
+    // tc_link `resolve` failures also set resolved:false but carry originalPath/attempts
+    // (no clicked/reason), so they must NOT be caught here — let them fall through to the
+    // generic JSON formatter, which preserves the attempts[] diagnostics.
+    if ("resolved" in data && ("clicked" in data || "reason" in data)) {
       if (data.resolved === false) return text(`no modal dialog open (${data.reason || "nothing to resolve"})`);
       const lines = [
         `${data.clicked ? "clicked" : "FAILED to click"} [${data.button}] on "${data.title || ""}"`,
@@ -602,7 +606,7 @@ server.registerTool(
       case "list":
         return textResult(await bridgeCall("plc_library_list_references", base));
       case "scan":
-        return textResult(await bridgeCall("plc_library_scan", base));
+        return textResult(await bridgeCall("plc_library_scan", { ...base, filter: p.filter }));
       case "repos":
         return textResult(await bridgeCall("plc_library_list_repositories", base));
       case "add_library":

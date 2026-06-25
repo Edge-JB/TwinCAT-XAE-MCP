@@ -10,14 +10,18 @@ Token-compression pass from an empirical audit of 261 real calls. Every change
 keeps full data reachable via an explicit opt-in; **no capability was removed**.
 
 ### Changed
-- **`tc_pou`/`plc_pou` search `maxResults` default 500 → 50.** Most name lookups
-  return well under 50 matches; `truncated:true` + `count` already signal when the
-  cap is hit, and the 5000 ceiling is unchanged. The zod schema now carries a
-  machine-readable `.default(50)` so `tools/list` self-documents it.
-- **Batch roll-ups are failures-only by default.** `tc_link` link_batch/unlink_batch
-  and `plc_pou` create_batch/create_folder_batch/set_decl_batch/set_impl_batch now
-  return `{count, succeeded, failed}` plus **only the failed rows**; pass
-  **`details:true`** for every row (create_batch ok-rows still carry child identity).
+- **`plc_pou` `search` `maxResults` default 500 → 50.** `maxResults` caps the
+  project-wide content grep (`search`, not the `find` name lookup); most greps
+  return well under 50 matches, and `truncated:true` + `count` already signal when
+  the cap is hit. Raise `maxResults` (up to the unchanged 5000 ceiling) for an
+  exhaustive find-all-usages. The zod schema now carries a machine-readable
+  `.default(50)` so `tools/list` self-documents it.
+- **Echo-only batch roll-ups are failures-only by default.** `tc_link`
+  link_batch/unlink_batch and `plc_pou` set_decl_batch/set_impl_batch now return
+  `{count, succeeded, failed}` plus **only the failed rows**; pass **`details:true`**
+  for every row. `plc_pou` create_batch/create_folder_batch **keep their success
+  rows** — each carries the authoritative created child identity (`child.pathName`,
+  which TwinCAT may auto-suffix), so a follow-up edit can use the real path.
 - **Single `tc_link link` and `resolve` are compact on success.** `link` drops the
   `producerResolution`/`consumerResolution` blobs (the resolved paths are already in
   `producer`/`consumer`); `resolve` drops the `attempts[]` permutation array. Pass
