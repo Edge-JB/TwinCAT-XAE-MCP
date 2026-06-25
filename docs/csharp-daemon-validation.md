@@ -44,7 +44,12 @@ Env knobs (all optional). The full table — what reads each one and its default
   (or set `TE1000_DAEMON_LOG=<path>` for an explicit location).
 
 The dialog watcher is configured by daemon CLI flags (`--no-watch`, `--no-autodismiss`,
-`--grace-ms`, `--allowlist`), not by env knobs; the grace window defaults to 4000 ms.
+`--grace-ms`, `--allowlist`). The Node front reads the `TE1000_DIALOG_WATCH` /
+`TE1000_DIALOG_AUTODISMISS` / `TE1000_DIALOG_GRACE_MS` env vars (see the
+[README](../README.md#environment-variables)) and translates them into those flags **when it spawns
+the daemon**, so the env knobs work, applied at spawn time. Since the daemon is single-instance per
+pipe, a changed value only takes effect once the daemon is killed and re-spawned. The grace window
+defaults to 4000 ms.
 
 ## Live smoke test — start READ-ONLY
 With XAE open on the solution, run these in order. Each should return quickly and

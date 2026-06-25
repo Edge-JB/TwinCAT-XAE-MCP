@@ -186,6 +186,24 @@ namespace Te1000Daemon
         }
     }
 
+    // Shared policy: dialogs whose title/body indicate a disruptive XAE operation
+    // (activate config, run-mode change, restart, download, boot project, or
+    // TwinSAFE/safety). The watcher NEVER auto-clicks one of these even if an
+    // allowlist rule matches it, and dialog_resolve refuses to persist a remember
+    // rule for one. Single source of truth so the guard code and the documented
+    // policy cannot drift apart.
+    internal static class DialogPolicy
+    {
+        public const string DisruptivePattern =
+            @"activate.*config|run[\s-]*mode|restart|download|boot\s*project|twinsafe|safety|set.*run|reset.*twincat";
+
+        public static bool LooksDisruptive(string title, string text)
+        {
+            string hay = (title ?? "") + " " + (text ?? "");
+            return Regex.IsMatch(hay, DisruptivePattern, RegexOptions.IgnoreCase);
+        }
+    }
+
     // Allowlist rule (mirrors dialog-allowlist.json shape).
     internal sealed class DlgRule
     {
@@ -355,7 +373,9 @@ namespace Te1000Daemon
         {
             // Read the copy-on-write field ONCE into a local so we iterate an
             // immutable snapshot even if AddRule reassigns the field mid-walk.
-            var rules = _rules;
+            // Volatile.Read pairs with AddRule's Volatile.Write so this lock-free
+            // reader is guaranteed to observe the freshly-published list.
+            var rules = Volatile.Read(ref _rules);
             foreach (var r in rules)
             {
                 if (string.IsNullOrEmpty(r.Match)) continue;
@@ -376,7 +396,7 @@ namespace Te1000Daemon
             {
                 var next = new List<DlgRule>(_rules);
                 next.Add(new DlgRule { Match = match, TextMatch = textMatch, Button = button });
-                _rules = next;
+                Volatile.Write(ref _rules, next);
             }
         }
 
@@ -417,10 +437,15 @@ namespace Te1000Daemon
             // would auto-click. Resolved WITHOUT clicking so the report-only path can
             // distinguish a true block from an about-to-be-auto-dismissed dialog.
             DlgRule rule = MatchRule(title, text);
+            // Safety backstop: never auto-click a disruptive prompt, even if a
+            // (possibly over-broad or hand-added) allowlist rule matches it. Only an
+            // allowlisted, NON-disruptive dialog is auto-dismissed; anything that
+            // looks disruptive is always surfaced for a human to resolve.
+            bool willAutoDismiss = rule != null && !DialogPolicy.LooksDisruptive(title, text);
             bool dismissed = false;
             string dismissedButton = null;
 
-            if (doDismiss && rule != null && DlgWatch.Click(dlg.Hwnd, rule.Button))
+            if (doDismiss && willAutoDismiss && DlgWatch.Click(dlg.Hwnd, rule.Button))
             {
                 dismissed = true;
                 dismissedButton = rule.Button;
@@ -431,9 +456,9 @@ namespace Te1000Daemon
                 Found = true,
                 // Blocking = present AND not going to clear on its own. When dismissing,
                 // a still-blocking result means the click failed. When only reporting
-                // (doDismiss:false), a dialog that matches an allowlist rule is NOT a
-                // persistent block — the watcher Loop will dismiss it — so don't flag it.
-                Blocking = doDismiss ? !dismissed : (rule == null),
+                // (doDismiss:false), a dialog the watcher will auto-dismiss is NOT a
+                // persistent block; a disruptive dialog (never auto-clicked) always is.
+                Blocking = doDismiss ? !dismissed : !willAutoDismiss,
                 Dismissed = dismissed,
                 DismissedButton = dismissedButton,
                 Title = title,

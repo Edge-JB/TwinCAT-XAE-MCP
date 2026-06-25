@@ -90,8 +90,8 @@ namespace Te1000Daemon
             // dialog_probe: COM-free diagnostic. Runs a one-shot window enumeration
             // (no COM, no STA hop) and returns the current modal-dialog snapshot —
             // the same shape the watcher feeds the grace recycle. Report-only: it
-            // never auto-dismisses (doDismiss:false), so it is safe to call against a
-            // live cell to ask "is XAE blocked on a dialog right now, and on what?".
+            // never auto-dismisses (doDismiss:false), so it is always safe to call —
+            // it just asks "is XAE blocked on a dialog right now, and on what?".
             if (action == "dialog_probe")
             {
                 resp["ok"] = true;
@@ -228,14 +228,11 @@ namespace Te1000Daemon
                 string title = snap.Title ?? "";
                 string text = snap.Text ?? "";
 
-                // Destructive denylist: never auto-remember a prompt that activates
-                // config, changes run-mode, restarts/downloads/boots, or touches
-                // TwinSAFE/safety. The one-time human-chosen click still happens.
-                string hay = title + " " + text;
-                bool looksDestructive = System.Text.RegularExpressions.Regex.IsMatch(
-                    hay,
-                    @"activate.*config|run[\s-]*mode|restart|download|boot\s*project|twinsafe|safety|set.*run|reset.*twincat",
-                    System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                // Disruptive denylist (shared with the watcher's auto-click backstop):
+                // never auto-remember a prompt that activates config, changes run-mode,
+                // restarts/downloads/boots, or touches TwinSAFE/safety. The one-time
+                // human-chosen click still happens.
+                bool looksDestructive = DialogPolicy.LooksDisruptive(title, text);
 
                 // Perform the one-time click the human chose.
                 bool clicked = DlgWatch.Click(snap.Hwnd, matchedButton);
@@ -257,11 +254,19 @@ namespace Te1000Daemon
                     }
                     else
                     {
-                        string escapedTitle = System.Text.RegularExpressions.Regex.Escape(title);
-                        bool appended = AppendAllowlistRule(w.AllowlistPath, escapedTitle, matchedButton);
+                        // Persist a SPECIFIC rule: anchor the exact title AND require the
+                        // body text, so the remembered rule cannot later match an
+                        // unrelated dialog that merely shares a title (many XAE prompts
+                        // share a title such as "TcXaeShell"). Fall back to the anchored
+                        // title alone only when the dialog has no body text.
+                        string titlePat = "^" + System.Text.RegularExpressions.Regex.Escape(title) + "$";
+                        string textPat = string.IsNullOrEmpty(text)
+                            ? null
+                            : System.Text.RegularExpressions.Regex.Escape(text.Length > 200 ? text.Substring(0, 200) : text);
+                        bool appended = AppendAllowlistRule(w.AllowlistPath, titlePat, textPat, matchedButton);
                         // Sync the running watcher's in-memory rules either way so it
                         // auto-dismisses next time without a daemon restart.
-                        w.AddRule(escapedTitle, null, matchedButton);
+                        w.AddRule(titlePat, textPat, matchedButton);
                         remembered = true;
                         if (!appended)
                             refuseReason = "rule applied in-memory but the allowlist file could not be updated (see daemon log)";
@@ -296,11 +301,11 @@ namespace Te1000Daemon
             return (s ?? "").Replace("&", "").Trim().ToLowerInvariant();
         }
 
-        // Append a literal-title rule to dialog-allowlist.json. Prefers a targeted
+        // Append a rule to dialog-allowlist.json. Prefers a targeted
         // insertion that preserves the file's hand-readable formatting; falls back
         // to a parse->add->compact rewrite. Writes atomically. Returns true on
         // success (file now contains valid JSON with the new rule).
-        private static bool AppendAllowlistRule(string path, string escapedTitle, string button)
+        private static bool AppendAllowlistRule(string path, string match, string textMatch, string button)
         {
             try
             {
@@ -338,7 +343,9 @@ namespace Te1000Daemon
                                 if (ws > p) indent = original.Substring(p, ws - p);
                             }
 
-                            string newRule = "{ \"match\": " + Json.Write(escapedTitle) + ", \"button\": " + Json.Write(button) + " }";
+                            string newRule = "{ \"match\": " + Json.Write(match)
+                                + (textMatch != null ? ", \"textMatch\": " + Json.Write(textMatch) : "")
+                                + ", \"button\": " + Json.Write(button) + " }";
 
                             // Inner content between [ and ] (exclusive).
                             string before = original.Substring(0, open + 1);
@@ -366,7 +373,8 @@ namespace Te1000Daemon
                 if (newText == null)
                 {
                     var ro = new Json.JObj();
-                    ro["match"] = escapedTitle;
+                    ro["match"] = match;
+                    if (textMatch != null) ro["textMatch"] = textMatch;
                     ro["button"] = button;
                     rules.Add(ro);
                     newText = Json.Write(root);
@@ -381,18 +389,34 @@ namespace Te1000Daemon
                     Json.JArr rules2 = root2.Arr("rules");
                     if (rules2 == null) return false;
                     var ro = new Json.JObj();
-                    ro["match"] = escapedTitle;
+                    ro["match"] = match;
+                    if (textMatch != null) ro["textMatch"] = textMatch;
                     ro["button"] = button;
                     rules2.Add(ro);
                     newText = Json.Write(root2);
                     Json.ParseObject(newText); // throws if still bad
                 }
 
-                // Atomic write: temp file + replace.
+                // Atomic write: write a temp file, then SWAP it into place. Never
+                // delete the original before the new content is committed — a failed
+                // swap must leave the existing allowlist intact, not wipe it. File.Replace
+                // is atomic and (since we returned early unless the file exists) always
+                // has a destination; the temp lives in the same directory so the swap is
+                // same-volume. On any failure the original is untouched and we report
+                // false (the rule still applied in-memory via the caller's AddRule).
                 string tmp = path + ".tmp";
                 System.IO.File.WriteAllText(tmp, newText, new System.Text.UTF8Encoding(false));
-                try { System.IO.File.Delete(path); } catch { }
-                System.IO.File.Move(tmp, path);
+                try
+                {
+                    string bak = path + ".bak";
+                    System.IO.File.Replace(tmp, path, bak);
+                    try { System.IO.File.Delete(bak); } catch { }
+                }
+                catch
+                {
+                    try { System.IO.File.Delete(tmp); } catch { }
+                    return false;
+                }
                 return true;
             }
             catch (Exception ex)

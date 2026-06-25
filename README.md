@@ -24,9 +24,10 @@ guards; the COM/DTE work runs in a **persistent native C#/.NET daemon**
 the sole backend. See [How it works](#how-it-works).
 
 > [!IMPORTANT]
-> This server drives a **real engineering tool** and can deploy to a **live PLC**.
-> Every action that touches the running target (activate, restart, download, deletes,
-> licensing) is **confirmation-gated** and off by default. See [Safety & guards](#safety--guards).
+> This server drives a **real engineering tool** and can activate or download to a
+> **TwinCAT runtime**. Every action that touches the target runtime (activate, restart,
+> download, deletes, licensing) is **confirmation-gated** and off by default.
+> See [Safety & guards](#safety--guards).
 
 ---
 
@@ -64,7 +65,7 @@ the sole backend. See [How it works](#how-it-works).
   "Add Box" route, driven from the device's ESI.
 - **Surgical PLC code edits** — `plc_pou` reads, greps, and patches declaration/implementation
   text in place and returns only the changed region, keeping agent context small.
-- **Safe by default** — destructive and live-target actions are confirmation-gated; the
+- **Safe by default** — destructive and runtime-affecting actions are confirmation-gated; the
   safety project is never written to, by policy.
 - **Resilient to GUI modals** — a dialog watchdog detects and (optionally) auto-dismisses
   modal dialogs that would otherwise hang a synchronous COM call forever.
@@ -253,6 +254,13 @@ the second by the native daemon process. Defaults are from the source.
 > The daemon also accepts CLI flags (`--pipe`, `--no-watch`, `--no-autodismiss`,
 > `--grace-ms`, `--allowlist`). The front sets these from the dialog-watch env vars above
 > when it spawns the daemon — you normally don't pass them by hand.
+>
+> **Caveat — spawn-time only.** `TE1000_DIALOG_WATCH`, `TE1000_DIALOG_AUTODISMISS`, and
+> `TE1000_DIALOG_GRACE_MS` are read by the Node front **only when it spawns the daemon**, and
+> are translated into the daemon's `--no-watch` / `--no-autodismiss` / `--grace-ms` flags.
+> The daemon is single-instance per pipe, so changing one of these has **no effect on an
+> already-running daemon** — kill that daemon process and let the front re-spawn it before the
+> new value takes effect.
 
 ## Quickstart
 
@@ -275,13 +283,13 @@ tc_ethercat    racks: [{
 
 # 4. Link a PLC input to a terminal channel
 tc_link        action: "link"
-               a: "TIPC^Cabsort Lite^Cabsort Lite Instance^PlcTask Inputs^MAIN.bStart"
+               a: "TIPC^MyPlc^MyPlc Instance^PlcTask Inputs^MAIN.bStart"
                b: "TIID^Device 2 (EtherCAT)^Term 1^Channel 1^Input"
 
 # 5. Build the solution
 xae_build      action: "build"
 
-# 6. (Optional, guarded) deploy to the live target
+# 6. (Optional, guarded) download to the target runtime
 plc_download   confirm: "ALLOW_PLC_DOWNLOAD"
 ```
 
@@ -350,7 +358,7 @@ batch semantics, and return shapes are documented in **[docs/tools.md](docs/tool
 ## Safety & guards
 
 The server **never auto-activates, auto-restarts, or auto-deploys**. Any action that
-changes the live target, deletes a node, or alters licensing is blocked unless you pass
+changes the target runtime, deletes a node, or alters licensing is blocked unless you pass
 the matching `confirm` token:
 
 | Confirm token | Unlocks |
@@ -387,7 +395,8 @@ would hang the MCP call and the calling agent indefinitely.
   worker thread (re-acquiring the session on a fresh STA thread) **without** killing the
   daemon, so subsequent calls recover once the dialog is cleared. Detection is dialog-driven,
   not a wall-clock timeout, so long legitimate builds are never killed. The allowlist ships
-  minimal and must never auto-answer Activate / Run-mode / restart / download / safety prompts.
+  **empty** (report-only by default) and must never auto-answer Activate / Run-mode / restart /
+  download / safety prompts.
 - **Interactive resolution.** When a dialog is *not* in the allowlist, the reported error tells
   the agent to **ask the user** which button to press (and whether to remember it), then call
   **`xae dialog_resolve {button, remember?}`**. That action clicks the chosen button on the live

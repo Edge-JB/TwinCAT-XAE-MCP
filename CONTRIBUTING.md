@@ -84,8 +84,8 @@ TwinCAT path — that requires a real XAE installation and is exercised manually
 
 ## Non-negotiable safety rules
 
-- **Guard every live-target, destructive, or licensing action** with a `confirm` token, enforced
-  in `index.js` (and re-checked defensively in the daemon). Off by default.
+- **Guard every runtime-affecting, destructive, or licensing action** with a `confirm` token,
+  enforced in `index.js` (and re-checked defensively in the daemon). Off by default.
 - **Never write toward the safety project.** Authoring tools must refuse safety-rooted (`TISC`)
   paths — `PathUtil.AssertNotSafetyPath` in the daemon. The guard is **case-insensitive** (regex
   `^\s*TISC(\^|$)`, IgnoreCase). Nothing in this toolchain may write toward the TwinSAFE/TISC

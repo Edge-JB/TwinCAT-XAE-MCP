@@ -9,7 +9,8 @@ behind every guarded action. For the tool list see [tools.md](tools.md).
 > rather than killing a process. (These were ported from an earlier per-call PowerShell
 > dialog-watcher + pre-flight gate, which has been removed.) See
 > [architecture.md](architecture.md). The dialog grace and the "XAE is blocked on a modal
-> dialog…" report are controlled by daemon CLI flags / its allowlist, not per-call env knobs.
+> dialog…" report are controlled by the daemon's CLI flags / its allowlist; the front translates
+> the dialog-watch env vars into those flags at spawn time (see [Watcher configuration](#watcher-configuration)).
 
 ## Why this matters
 
@@ -42,20 +43,22 @@ A dialog that is **already open before** a command (you edited a file outside XA
 connection dropped, an earlier prompt was never cleared) corrupts the next command's result —
 e.g. a build returns a bogus *"No solution is open"*. The daemon's watcher catches such a
 pre-existing dialog the same way: it auto-dismisses an allowlisted one, and otherwise the
-in-flight call surfaces the dialog's details instead of firing into a poisoned XAE. Use
-`xae dialog_probe` to inspect the current dialog without clicking anything.
+in-flight call surfaces the dialog's details instead of firing into an XAE that is blocked on a
+dialog. Use `xae dialog_probe` to inspect the current dialog without clicking anything.
 
 ### Allowlist (`dialog-allowlist.json`)
 
-Ships with one rule — the *"file has been changed outside the environment → reload?"* prompt is
-auto-answered **Yes**, so an agent's own source edits load into XAE. Each rule has `match` (regex
-on the title, required), optional `textMatch` (regex on the body), and `button` (exact label to
-click). First match wins; unmatched dialogs are reported, never clicked.
+Ships **empty** — the `rules` array is empty, so a fresh clone is **report-only by default** and
+auto-clicks nothing. You build the allowlist up yourself, either by hand or via
+`xae dialog_resolve {button, remember:true}` (which appends a rule and hot-applies it to the
+running watcher). Each rule has `match` (regex on the title, required), optional `textMatch` (regex
+on the body), and `button` (exact label to click). First match wins; unmatched dialogs are
+reported, never clicked.
 
 > [!WARNING]
-> **Live cell.** Only allowlist dialogs that are safe to auto-answer unattended. **Never**
-> allowlist Activate Configuration, Run-mode, restart, download, or safety prompts — those must
-> stay human-confirmed. Prefer the non-destructive button.
+> Only allowlist dialogs that are safe to auto-answer unattended. **Never** allowlist Activate
+> Configuration, Run-mode, restart, download, or safety prompts — those must stay human-confirmed.
+> Prefer the non-destructive button.
 
 Run the `xae dialog_probe` action at any time to print the current dialog (if any) as JSON —
 useful for discovering the exact `title`/`button` strings for a new rule.
@@ -63,8 +66,12 @@ useful for discovering the exact `title`/`button` strings for a new rule.
 ### Watcher configuration
 
 The watcher is configured by daemon CLI flags (`--no-watch`, `--no-autodismiss`, `--grace-ms`,
-`--allowlist`) parsed in `Program.cs`, not by per-call environment variables. The grace window
-defaults to 4000 ms.
+`--allowlist`) parsed in `Program.cs`. The Node front reads the `TE1000_DIALOG_WATCH` /
+`TE1000_DIALOG_AUTODISMISS` / `TE1000_DIALOG_GRACE_MS` environment variables and translates them
+into those flags **when it spawns the daemon**, so the env knobs still work — applied at spawn
+time. Because the daemon is single-instance per pipe, changing one of these env vars has **no
+effect on an already-running daemon**: kill that daemon process and let the front re-spawn it for
+the new value to take hold. The grace window defaults to 4000 ms.
 
 ## PLC session control (auto-logout)
 
@@ -88,7 +95,7 @@ reliable session detector (Logout enabled ⇒ logged in).
 ## Safety model
 
 The server **never auto-activates, auto-restarts, or auto-deploys**. Every action that changes
-the live target, deletes a node, or alters licensing requires the matching `confirm` token (see
+the target runtime, deletes a node, or alters licensing requires the matching `confirm` token (see
 [README → Safety & guards](../README.md#safety--guards)). Tokens are enforced in `index.js` and
 re-checked defensively in the daemon.
 

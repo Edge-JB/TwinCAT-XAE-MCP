@@ -105,13 +105,18 @@ function prune(v) {
 
 function textResult(data) {
   if (data && typeof data === "object") {
-    if ("resolved" in data) {
+    if ("resolved" in data && ("clicked" in data || data.resolved === false)) {
       if (data.resolved === false) return text(`no modal dialog open (${data.reason || "nothing to resolve"})`);
       const lines = [
         `${data.clicked ? "clicked" : "FAILED to click"} [${data.button}] on "${data.title || ""}"`,
       ];
-      if (data.remembered) lines.push("remembered: added an auto-dismiss rule to dialog-allowlist.json (hot-applied to the watcher)");
-      else if (data.rememberRefused) lines.push(`NOT remembered: ${data.refuseReason || "destructive prompt refused for auto-remember"}`);
+      if (data.remembered) {
+        // remembered:true means the rule was applied in-memory (hot-applied to the
+        // watcher). A refuseReason alongside it means the FILE write failed — surface
+        // it so the user knows it won't persist across a daemon restart.
+        if (data.refuseReason) lines.push(`remembered IN-MEMORY only (hot-applied to the watcher) — NOT persisted: ${data.refuseReason}`);
+        else lines.push("remembered: added an auto-dismiss rule to dialog-allowlist.json (hot-applied to the watcher)");
+      } else if (data.rememberRefused) lines.push(`NOT remembered: ${data.refuseReason || "disruptive prompt refused for auto-remember"}`);
       else if (data.refuseReason) lines.push(`NOT remembered: ${data.refuseReason}`);
       return text(lines.join("\n"));
     }
