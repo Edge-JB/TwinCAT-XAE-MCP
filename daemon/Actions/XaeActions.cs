@@ -353,11 +353,16 @@ namespace Te1000Daemon
         // xae_get_error_list (L3914-3954) + XaeErrorListProbe (L205-260).
         private static Json.JObj XaeGetErrorList(ActionContext ctx)
         {
-            int limit = 200;
-            if (ctx.Payload.Has("limit")) limit = ctx.Payload.Int("limit", 200);
+            // R6: error_list-specific default lowered 200 -> 50 (build-error floods
+            // collapse; count still reports the true total). severityFilter trims to
+            // errors/warnings BEFORE the cap so an errors-only query is never starved
+            // by a leading warning flood.
+            int limit = 50;
+            if (ctx.Payload.Has("limit")) limit = ctx.Payload.Int("limit", 50);
+            string severityFilter = ctx.Payload.Has("severityFilter") ? ctx.Payload.Str("severityFilter") : "all";
 
             string error;
-            ErrorListResult result = ReadErrorList(ctx, limit, out error);
+            ErrorListResult result = ReadErrorList(ctx, limit, severityFilter, out error);
             if (result == null)
             {
                 var unavailable = new Json.JObj();
@@ -479,7 +484,21 @@ namespace Te1000Daemon
             public Json.JArr Items;
         }
 
-        private static ErrorListResult ReadErrorList(ActionContext ctx, int limit, out string error)
+        // R6: ErrorLevel serializes as the strings "vsBuildErrorLevelHigh"/"Medium"/
+        // "Low" (High = error, Medium = warning, Low = message) — NOT "Error". Match
+        // on the substring so each filter maps to exactly one documented severity:
+        // errors -> High, warnings -> Medium. Low (message) rows show only under 'all'
+        // (folding them into 'warnings' would inflate the warning count).
+        private static bool SeverityMatches(string level, string filter)
+        {
+            if (string.IsNullOrEmpty(filter) || filter == "all") return true;
+            if (level == null) return false;
+            if (filter == "errors") return level.IndexOf("High", StringComparison.OrdinalIgnoreCase) >= 0;
+            if (filter == "warnings") return level.IndexOf("Medium", StringComparison.OrdinalIgnoreCase) >= 0;
+            return true;
+        }
+
+        private static ErrorListResult ReadErrorList(ActionContext ctx, int limit, string severityFilter, out string error)
         {
             error = null;
             IntPtr pUnk = IntPtr.Zero;
@@ -504,25 +523,35 @@ namespace Te1000Daemon
                 try { errorList.ShowMessages = true; } catch { }
 
                 EnvDTE80.ErrorItems errorItems = errorList.ErrorItems;
-                int totalCount = errorItems.Count;
-                int returnedCount = totalCount < limit ? totalCount : limit;
+                int rawCount = errorItems.Count;
 
+                // R6: with a severity filter active, walk ALL items so `count` reflects
+                // the true matching total (one COM ErrorLevel read per item). Without a
+                // filter the total IS rawCount, so stop collecting at `limit` and skip
+                // the full walk — keeps the common build-flood path bounded (R7).
+                bool filtering = !(string.IsNullOrEmpty(severityFilter) || severityFilter == "all");
+                int matchedTotal = 0;
                 var items = new Json.JArr();
-                for (int i = 1; i <= returnedCount; i++)
+                for (int i = 1; i <= rawCount; i++)
                 {
+                    if (!filtering && items.Count >= limit) break; // total is rawCount; no need to walk on
                     EnvDTE80.ErrorItem item = errorItems.Item(i);
+                    string level = ComHelpers.SafeStr(delegate() { return item.ErrorLevel; });
+                    if (!SeverityMatches(level, severityFilter)) continue;
+                    matchedTotal++;
+                    if (items.Count >= limit) continue; // keep counting, stop collecting
                     var o = new Json.JObj();
                     o["description"] = ComHelpers.SafeStr(delegate() { return item.Description; });
                     o["fileName"] = ComHelpers.SafeStr(delegate() { return item.FileName; });
                     o["line"] = NullableInt(delegate() { return item.Line; });
                     o["column"] = NullableInt(delegate() { return item.Column; });
                     o["project"] = ComHelpers.SafeStr(delegate() { return item.Project; });
-                    o["errorLevel"] = ComHelpers.SafeStr(delegate() { return item.ErrorLevel; });
+                    o["errorLevel"] = level;
                     items.Add(o);
                 }
 
                 ErrorListResult result = new ErrorListResult();
-                result.TotalCount = totalCount;
+                result.TotalCount = filtering ? matchedTotal : rawCount;
                 result.Items = items;
                 return result;
             }
