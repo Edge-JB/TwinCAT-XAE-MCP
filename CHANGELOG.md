@@ -4,6 +4,50 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.0] — 2026-08-12
+
+MCP protocol upgrade: the server now speaks the **2026-07-28 stateless protocol
+revision** alongside the legacy handshake, on the same stdio endpoint. The tool
+surface (25 tools — names, descriptions, inputSchemas) is verified identical
+across both eras. Versus v2.3.0 there is exactly **one** wire-visible schema
+difference, introduced by the SDK's JSON-Schema converter rather than by this
+repo's code: each tool's `inputSchema.$schema` declaration is now JSON Schema
+**draft 2020-12** where SDK v1 emitted draft-07. Properties, enums, defaults,
+required lists, descriptions and tool order were diffed against live SDK 1.29.0
+output and are byte-identical.
+
+### Added
+- **Stateless 2026-07-28 era support** via the MCP SDK v2 `serveStdio` entry:
+  answers `server/discover`, accepts per-request `_meta` envelopes
+  (`io.modelcontextprotocol/protocolVersion` / `clientCapabilities` /
+  `clientInfo`) with **no `initialize` handshake**, stamps `resultType` and
+  `io.modelcontextprotocol/serverInfo` on results, and survives era re-pinning
+  (a modern `server/discover` probe followed by a legacy `initialize` on the
+  same connection is served by a fresh instance).
+- **Cache hints** (SEP-2549): `tools/list` and `server/discover` results carry
+  `ttlMs: 3600000` — the tool surface is fixed for the process lifetime, so
+  2026-era clients may cache instead of re-polling (the SDK default stamp is
+  `ttlMs: 0` = uncacheable). Scope stays `private`. Legacy responses are
+  untouched (the 2025-era codec never stamps cache fields).
+
+### Changed
+- **MCP SDK v1 → v2**: dependency `@modelcontextprotocol/sdk` ^1.29.0 replaced
+  by `@modelcontextprotocol/server` ^2.0.0 (scoped v2 package; Node >= 20 and
+  zod >= 4.2 requirements already met). `McpServer` construction moved into a
+  `buildServer()` factory that `serveStdio` invokes per era-pinned connection;
+  the 25 `server.registerTool(...)` call sites are textually unchanged and now
+  record into the factory's replay list.
+- **`toolSchemas.js` raw shapes are wrapped in `z.object()` once at export**
+  (SDK v2 deprecates the raw-shape `registerTool` overload). The wrap itself
+  adds nothing to the wire — `z.object(shape)` is exactly what v1 applied
+  internally; the only tools/list difference vs v1 is the SDK-level `$schema`
+  dialect change noted above, which happens wrap or no wrap.
+- Legacy clients keep working unchanged: `initialize` (2025-11-25 and earlier)
+  negotiates exactly as before, and no 2026-era fields (`resultType`, `ttlMs`,
+  `cacheScope`, serverInfo `_meta` stamps) leak into legacy responses. The
+  `$schema` dialect change above is the one difference a legacy client can
+  observe relative to v2.3.0.
+
 ## [2.3.0] — 2026-06-25
 
 Token-compression pass from an empirical audit of 261 real calls. Every change
@@ -294,6 +338,8 @@ nearly the entire automatable TE1000 surface.
   `ProduceXml`/`ConsumeXml`, variable linking, NetId targeting, rescans, NC inspection, and
   guarded activate/restart/download.
 
+[2.4.0]: https://github.com/Edge-JB/TwinCAT-XAE-MCP/releases/tag/v2.4.0
+[2.3.0]: https://github.com/Edge-JB/TwinCAT-XAE-MCP/releases/tag/v2.3.0
 [2.2.0]: https://github.com/Edge-JB/TwinCAT-XAE-MCP/releases/tag/v2.2.0
 [2.1.0]: https://github.com/Edge-JB/TwinCAT-XAE-MCP/releases/tag/v2.1.0
 [2.0.0]: https://github.com/Edge-JB/TwinCAT-XAE-MCP/releases
