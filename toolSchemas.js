@@ -20,9 +20,14 @@
 //   (names, descriptions, inputSchemas) is byte-for-byte identical before/after.
 //   Do NOT "tidy" a schema here without re-running the tools/list diff snapshot.
 //   Since SDK v2 the raw shapes are wrapped in z.object() ONCE at the bottom of
-//   this file (v2 deprecates the raw-shape registerTool overload); z.object(shape)
-//   emits the same JSON Schema the v1 SDK produced by wrapping internally, so the
-//   guarantee above still holds. Keep authoring entries as raw shapes.
+//   this file (v2 deprecates the raw-shape registerTool overload); the wrap adds
+//   nothing to the wire — z.object(shape) is exactly what v1 applied internally.
+//   One SDK-level change rides the v2 upgrade regardless of the wrap: each
+//   emitted inputSchema's $schema dialect is now JSON Schema draft 2020-12
+//   (SDK v1 emitted draft-07). Diffed against live SDK 1.29.0 output: that
+//   $schema URI is the ONLY difference — properties, enums, defaults, required
+//   lists, descriptions and tool order are byte-identical. Keep authoring
+//   entries as raw shapes.
 //
 // The confirmation tokens and the XAE action map live here too, because the schema
 // descriptions interpolate the tokens; index.js re-exports them so its handlers
@@ -673,8 +678,10 @@ const toolSchemas = {
 };
 
 // SDK v2 wants a real ZodObject per tool (raw shapes are a deprecated,
-// auto-wrapped overload). One wrap here covers every entry; the emitted JSON
-// Schema is identical to what v1 produced by wrapping internally.
+// auto-wrapped overload). One wrap here covers every entry and adds nothing to
+// the wire — z.object(shape) is the same wrap v1 applied internally (the
+// draft-2020-12 $schema dialect noted in the header comes from the SDK's
+// converter, wrap or no wrap).
 for (const schema of Object.values(toolSchemas)) {
   schema.inputSchema = z.object(schema.inputSchema);
 }

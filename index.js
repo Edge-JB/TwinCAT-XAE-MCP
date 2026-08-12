@@ -11,9 +11,11 @@
 // exposes no window automation, so they never worked here); reach them via
 // xae_command if ever needed on another shell.
 // Protocol: MCP SDK v2's serveStdio serves BOTH wire eras on this one stdio
-// endpoint — legacy clients open with initialize (<= 2025-11-25), stateless
-// 2026-07-28 clients open with server/discover or a _meta envelope claim; the
-// opening message pins the era and nothing era-specific lives in the handlers.
+// endpoint. The opening message pins the era: a request carrying a valid
+// 2026-07-28 _meta envelope claim (server/discover included) pins modern; an
+// initialize — or ANY claim-less message, a bare server/discover included —
+// pins legacy, per the stdio rules (the body is the only era signal; there is
+// no header layer). Nothing era-specific lives in the handlers.
 "use strict";
 
 const { spawn } = require("child_process");

@@ -73,9 +73,11 @@ the sole backend. See [How it works](#how-it-works).
   caches the project tree and POU source text, so warm `plc_pou search` runs roughly
   **500× faster** than the old per-call spawn model.
 - **Speaks both MCP protocol eras** — the stateless **2026-07-28** revision
-  (`server/discover` probe, per-request `_meta` envelopes, `resultType` + cache-hint
-  stamping) and the legacy `initialize` handshake (≤ 2025-11-25), on one stdio endpoint;
-  the opening message pins the era per connection (MCP SDK v2 `serveStdio`).
+  (envelope-carrying `server/discover` probe, per-request `_meta` envelopes, `resultType`
+  + cache-hint stamping) and the legacy `initialize` handshake (≤ 2025-11-25), on one
+  stdio endpoint. The opening message pins the era per connection (MCP SDK v2
+  `serveStdio`); a claim-less opening — including a bare `server/discover` — is served
+  as legacy traffic per the stdio binding's rules.
 
 ## How it works
 
@@ -177,7 +179,7 @@ Verify the server starts:
 
 ```powershell
 node index.js
-# -> te1000-mcp server running on stdio   (Ctrl-C to exit)
+# -> te1000-mcp server running on stdio (native daemon mode; MCP 2026-07-28 stateless + legacy initialize)   (Ctrl-C to exit)
 ```
 
 The server communicates over stdio and is normally launched **by an MCP client**, not by
