@@ -10,12 +10,16 @@
 // plc_login/plc_logout were dropped from the surface (DTE on the 64-bit shell
 // exposes no window automation, so they never worked here); reach them via
 // xae_command if ever needed on another shell.
+// Protocol: MCP SDK v2's serveStdio serves BOTH wire eras on this one stdio
+// endpoint — legacy clients open with initialize (<= 2025-11-25), stateless
+// 2026-07-28 clients open with server/discover or a _meta envelope claim; the
+// opening message pins the era and nothing era-specific lives in the handlers.
 "use strict";
 
 const { spawn } = require("child_process");
 const path = require("path");
-const { McpServer } = require("@modelcontextprotocol/sdk/server/mcp.js");
-const { StdioServerTransport } = require("@modelcontextprotocol/sdk/server/stdio.js");
+const { McpServer } = require("@modelcontextprotocol/server");
+const { serveStdio } = require("@modelcontextprotocol/server/stdio");
 const daemonClient = require("./daemonClient.js");
 // Tool input schemas are defined ONCE in toolSchemas.js (single source of truth);
 // registerTool below looks them up by name. The confirmation tokens and XAE action
@@ -159,7 +163,35 @@ function need(params, keys, action) {
   }
 }
 
-const server = new McpServer({ name: "te1000-mcp", version: "2.3.0" });
+// serveStdio may invoke the factory more than once per process: the opening
+// message pins the connection's era, and a modern probe followed by a legacy
+// initialize re-pins onto a FRESH instance (negotiated-era state lives on the
+// instance, so instances cannot be shared across pins). The registerTool
+// statements below therefore run once at module load into this recorder, and
+// buildServer() replays them onto a new McpServer per factory call.
+const registrations = [];
+const server = {
+  registerTool: (name, config, handler) => registrations.push([name, config, handler]),
+};
+
+function buildServer() {
+  const mcp = new McpServer(
+    { name: "te1000-mcp", version: "2.4.0" },
+    {
+      // 2026-07-28 cache hints: the tool surface is fixed for the life of the
+      // process, so stateless clients may cache tools/list and server/discover
+      // for the session instead of re-polling (default stamp is ttlMs:0 =
+      // uncacheable). serveStdio itself installs the modern protocol versions
+      // and the server/discover handler on modern-pinned instances.
+      cacheHints: {
+        "tools/list": { ttlMs: 3600000 },
+        "server/discover": { ttlMs: 3600000 },
+      },
+    },
+  );
+  for (const [name, config, handler] of registrations) mcp.registerTool(name, config, handler);
+  return mcp;
+}
 
 server.registerTool(
   "xae",
@@ -952,13 +984,9 @@ server.registerTool(
   },
 );
 
-async function main() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error("te1000-mcp server running on stdio (native daemon mode)");
+function main() {
+  serveStdio(buildServer, { onerror: (error) => console.error("Server error:", error) });
+  console.error("te1000-mcp server running on stdio (native daemon mode; MCP 2026-07-28 stateless + legacy initialize)");
 }
 
-main().catch((error) => {
-  console.error("Server error:", error);
-  process.exit(1);
-});
+main();

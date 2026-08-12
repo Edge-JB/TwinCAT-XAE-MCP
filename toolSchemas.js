@@ -19,6 +19,10 @@
 //   JSON-Schema `inputSchema` from these zod shapes, so the wire-visible tools/list
 //   (names, descriptions, inputSchemas) is byte-for-byte identical before/after.
 //   Do NOT "tidy" a schema here without re-running the tools/list diff snapshot.
+//   Since SDK v2 the raw shapes are wrapped in z.object() ONCE at the bottom of
+//   this file (v2 deprecates the raw-shape registerTool overload); z.object(shape)
+//   emits the same JSON Schema the v1 SDK produced by wrapping internally, so the
+//   guarantee above still holds. Keep authoring entries as raw shapes.
 //
 // The confirmation tokens and the XAE action map live here too, because the schema
 // descriptions interpolate the tokens; index.js re-exports them so its handlers
@@ -667,5 +671,12 @@ const toolSchemas = {
     inputSchema: { confirm: z.string() },
   },
 };
+
+// SDK v2 wants a real ZodObject per tool (raw shapes are a deprecated,
+// auto-wrapped overload). One wrap here covers every entry; the emitted JSON
+// Schema is identical to what v1 produced by wrapping internally.
+for (const schema of Object.values(toolSchemas)) {
+  schema.inputSchema = z.object(schema.inputSchema);
+}
 
 module.exports = { toolSchemas, CONFIRMATIONS, XAE_ACTIONS, ...CONFIRMATIONS };

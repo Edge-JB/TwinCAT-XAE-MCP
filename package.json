@@ -1,6 +1,6 @@
 {
   "name": "te1000-mcp",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "description": "MCP server for Beckhoff TwinCAT TE1000 / XAE Shell automation",
   "main": "index.js",
   "scripts": {
@@ -32,7 +32,7 @@
   },
   "type": "commonjs",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/server": "^2.0.0",
     "zod": "^4.3.6"
   }
 }
