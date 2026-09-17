@@ -148,7 +148,7 @@ namespace Te1000Daemon
         // private helpers
         // ===================================================================
 
-        // Invoke-PlcProjectCommand (L2914-3000): select the "<plc> Project" node in
+        // Invoke-PlcProjectCommand (L2914-3000): select the nested IEC project node in
         // Solution Explorer (selection-context establishes IsAvailable for the PLC
         // online commands), temporarily force automation SilentMode, then try the
         // candidate command names, then a fallback scan by name pattern. Throws if
@@ -242,23 +242,33 @@ namespace Te1000Daemon
 
         // Select-PlcProjectInSolutionExplorer (L2822-2912): the PLC login/download/
         // logout DTE commands are selection-context-sensitive — they stay
-        // IsAvailable=false until the "<plc> Project" node is selected in Solution
+        // IsAvailable=false until the nested IEC project node is selected in Solution
         // Explorer. Only UIHierarchyItem.Select() establishes that context.
         private static string SelectPlcProjectInSolutionExplorer(ActionContext ctx, dynamic dte, string plcItemName)
         {
             dynamic sm = ctx.SysManager();
             string plcName = null;
+            string nestedName = null;
             try
             {
                 dynamic tipc = sm.LookupTreeItem("TIPC");
-                if (ComHelpers.ChildCount(tipc) >= 1) plcName = ComHelpers.SafeStr(delegate { return tipc.Child(1).Name; });
+                if (ComHelpers.ChildCount(tipc) >= 1)
+                {
+                    dynamic plcRoot = tipc.Child(1);
+                    plcName = ComHelpers.SafeStr(delegate { return plcRoot.Name; });
+                    // The Solution Explorer node for the nested IEC project carries the
+                    // same (localized, user-chosen) name as the sysmanager tree item —
+                    // read it via ITcProjectRoot.NestedProject instead of guessing
+                    // "<name> Project" (issue #11).
+                    nestedName = PlcProjectHelper.GetNestedProjectName((object)plcRoot);
+                }
             }
             catch { }
 
             if (string.IsNullOrWhiteSpace(plcItemName))
             {
                 if (string.IsNullOrWhiteSpace(plcName)) throw new BridgeException("Could not determine the PLC project name from TIPC");
-                plcItemName = plcName + " Project";
+                plcItemName = !string.IsNullOrWhiteSpace(nestedName) ? nestedName : (plcName + " Project");
             }
 
             ComHelpers.Safe<object>(delegate { dte.ExecuteCommand("View.SolutionExplorer"); return null; });

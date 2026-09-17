@@ -36,26 +36,56 @@ namespace Te1000Daemon
         }
 
         // CheckAllObjects (build-validate) lives on ITcPlcIECProject2 on the
-        // nested project INSTANCE node.
+        // nested IEC project node (ITcProjectRoot.NestedProject of the PLC root).
         public static bool CheckAll(object iecProject)
         {
             return ((ITcPlcIECProject2)iecProject).CheckAllObjects();
         }
 
-        // ITcProjectRoot.NestedProject is the documented identity read on the PLC root.
-        public static string GetNestedProjectName(object projectRoot)
+        // The nested IEC project of a PLC root, resolved through the
+        // Automation Interface rather than by display name.
+        //
+        // The nested project's tree name is localized by the XAE shell
+        // ("<name> Project" on English installs, "<name> Projekt" on German
+        // ones, ...) and follows the user-chosen project name, so callers must
+        // never construct it from the PLC root name + " Project" (issue #11).
+        // ITcProjectRoot.NestedProject is language-independent and hands back
+        // the exact object; ITcSmTreeItem.PathName is its exact tree path.
+        public sealed class NestedProject
+        {
+            public object Item;   // the ITcSmTreeItem / ITcPlcIECProject(2) object
+            public string Name;   // e.g. "Example Projekt"
+            public string Path;   // e.g. "TIPC^Example^Example Projekt"
+        }
+
+        // Returns null when the root does not expose ITcProjectRoot, has no
+        // nested project, or the read fails — callers fall back to probing.
+        public static NestedProject ResolveNestedProject(object projectRoot)
         {
             try
             {
                 ITcProjectRoot typed = (ITcProjectRoot)projectRoot;
                 object nested = typed.NestedProject;
                 if (nested == null) { return null; }
-                return ((ITcSmTreeItem)nested).Name;
+                ITcSmTreeItem item = (ITcSmTreeItem)nested;
+                NestedProject r = new NestedProject();
+                r.Item = nested;
+                r.Name = item.Name;
+                try { r.Path = item.PathName; } catch { r.Path = null; }
+                return r;
             }
             catch { return null; }
         }
 
-        // First child of the PLC root is the project instance node ('<name> Project').
+        // ITcProjectRoot.NestedProject is the documented identity read on the PLC root.
+        public static string GetNestedProjectName(object projectRoot)
+        {
+            NestedProject nested = ResolveNestedProject(projectRoot);
+            return nested == null ? null : nested.Name;
+        }
+
+        // First child of the PLC root is the project instance node ('<name> Instance').
+        // The nested IEC project is NOT enumerated as a child; use ResolveNestedProject.
         public static string GetInstanceName(object treeItem)
         {
             try

@@ -4,6 +4,30 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.1] — 2026-09-17
+
+### Fixed
+- **`plc_pou check_objects` failed on non-English XAE shells** (#11). The nested
+  IEC project node was located by appending the English display suffix to the
+  PLC root name (`TIPC^<name>^<name> Project`). On a German XAE the node is
+  `<name> Projekt`, so `CheckAllObjects` never found an `ITcPlcIECProject2`
+  implementer and failed with `E_NOINTERFACE`. The nested project does **not**
+  appear in the PLC root's ordinary child enumeration (only the `<name> Instance`
+  node does), so the child-probe fallback could not rescue it either. The daemon
+  now resolves the nested project through the Automation Interface —
+  `ITcProjectRoot.NestedProject` on the PLC root, with `ITcSmTreeItem.PathName`
+  for its exact tree path — which is independent of the shell language, the
+  ` Project` suffix and the user-chosen project name. A new central resolver
+  (`PlcProjectHelper.ResolveNestedProject` / `ComHelpers.ResolveNestedProject`)
+  backs every code path that previously guessed the name:
+  `plc_pou check_objects`, the post-edit `validate:true` check, PLC project-node
+  resolution for `plc_pou tree` / `find` / `search`, `tc_task get_linked_task` /
+  `set_linked_task` candidate discovery, and the Solution Explorer selection used
+  by `session` PLC login/download/logout. The legacy by-name probing remains as a
+  fallback only when the root does not expose `ITcProjectRoot`. Verified live
+  (TcXaeShell.DTE.17.0, English): `check_objects`, `tree`, `get_linked_task` all
+  resolve `TIPC^<name>^<name> Project` via the API path.
+
 ## [2.4.0] — 2026-08-12
 
 MCP protocol upgrade: the server now speaks the **2026-07-28 stateless protocol
@@ -338,6 +362,7 @@ nearly the entire automatable TE1000 surface.
   `ProduceXml`/`ConsumeXml`, variable linking, NetId targeting, rescans, NC inspection, and
   guarded activate/restart/download.
 
+[2.4.1]: https://github.com/Edge-JB/TwinCAT-XAE-MCP/releases/tag/v2.4.1
 [2.4.0]: https://github.com/Edge-JB/TwinCAT-XAE-MCP/releases/tag/v2.4.0
 [2.3.0]: https://github.com/Edge-JB/TwinCAT-XAE-MCP/releases/tag/v2.3.0
 [2.2.0]: https://github.com/Edge-JB/TwinCAT-XAE-MCP/releases/tag/v2.2.0

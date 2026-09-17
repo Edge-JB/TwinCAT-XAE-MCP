@@ -549,8 +549,9 @@ namespace Te1000Daemon
 
         // Resolve-PlcTaskRefCandidates (L1186-1259): ordered list of candidate tree
         // PATHS that might implement ITcPlcTaskReference. When a path is supplied it
-        // is the single candidate. Otherwise probe the '<name> Project' node and the
-        // PLC root's children, preferring a 'PlcTask'-named child, plus the
+        // is the single candidate. Otherwise probe the nested IEC project node (then
+        // the legacy '<name> Project' guess) and the PLC root's children, preferring
+        // a 'PlcTask'-named child, plus the
         // well-known names PlcTask/VISU_TASK, then fall back to the project/root nodes.
         private static List<string> ResolvePlcTaskRefCandidates(ActionContext ctx, dynamic sm, string path)
         {
@@ -567,11 +568,19 @@ namespace Te1000Daemon
 
             var candidatePaths = new List<string>();
 
-            // Build the list of project-node paths to probe.
+            // Build the list of project-node paths to probe. The nested IEC project
+            // comes first, resolved via ITcProjectRoot.NestedProject so the probe
+            // does not depend on the English "<name> Project" display name (issue #11).
             var projectPaths = new List<string>();
+            PlcProjectHelper.NestedProject nested = ComHelpers.ResolveNestedProject(plcPath, root);
+            if (nested != null && !string.IsNullOrWhiteSpace(nested.Path))
+            {
+                projectPaths.Add(nested.Path);
+            }
             if (!string.IsNullOrWhiteSpace(rootName))
             {
-                projectPaths.Add(plcPath + "^" + rootName + " Project");
+                string en = plcPath + "^" + rootName + " Project";
+                if (!projectPaths.Contains(en)) projectPaths.Add(en);
             }
             int rootChildCount = ComHelpers.ChildCount(root);
             for (int ri = 1; ri <= rootChildCount; ri++)
