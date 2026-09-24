@@ -3,6 +3,16 @@ using TCatSysManagerLib;
 
 namespace Te1000Daemon
 {
+    public sealed class PlcProjectIdentity
+    {
+        public string PlcPath;
+        public string PlcName;
+        public string ProjectPath;
+        public string ProjectName;
+        public object PlcRoot;
+        public object NestedProject;
+    }
+
     // Verbatim port of the bridge's compiled Te1000PlcProjectHelper (L782-851).
     //
     // ITcPlcProject / ITcPlcIECProject(2) / ITcProjectRoot / ITcSmTreeItem /
@@ -14,6 +24,70 @@ namespace Te1000Daemon
     // view (it is, on this machine — same precondition as the PS helper).
     public static class PlcProjectHelper
     {
+        public static PlcProjectIdentity Resolve(dynamic systemManager, string plcPath)
+        {
+            if (string.IsNullOrWhiteSpace(plcPath))
+            {
+                dynamic tipc = ComHelpers.GetTreeItem(systemManager, "TIPC");
+                if (ComHelpers.ChildCount(tipc) < 1)
+                    throw new BridgeException("No PLC project found under TIPC");
+                dynamic first = ComHelpers.Child(tipc, 1);
+                string firstName = ComHelpers.SafeStr(delegate { return first.Name; });
+                if (string.IsNullOrWhiteSpace(firstName))
+                    throw new BridgeException("The first PLC project under TIPC has no usable name");
+                plcPath = "TIPC^" + firstName;
+            }
+
+            PathUtil.AssertNotSafetyPath(plcPath);
+            dynamic root = ComHelpers.GetTreeItem(systemManager, plcPath);
+            string plcName = ComHelpers.SafeStr(delegate { return root.Name; });
+            if (string.IsNullOrWhiteSpace(plcName))
+                throw new BridgeException("PLC root '" + plcPath + "' has no usable name");
+            object nested;
+            try
+            {
+                nested = ((ITcProjectRoot)(object)root).NestedProject;
+            }
+            catch (Exception ex)
+            {
+                throw new BridgeException("PLC root '" + plcPath +
+                    "' does not implement ITcProjectRoot or expose NestedProject: " + ex.Message);
+            }
+            if (nested == null)
+                throw new BridgeException("PLC root '" + plcPath + "' exposes no nested IEC project");
+
+            ITcSmTreeItem nestedItem;
+            try
+            {
+                nestedItem = (ITcSmTreeItem)nested;
+            }
+            catch (Exception ex)
+            {
+                throw new BridgeException("NestedProject of PLC root '" + plcPath +
+                    "' does not implement ITcSmTreeItem: " + ex.Message);
+            }
+
+            string projectName = nestedItem.Name;
+            if (string.IsNullOrWhiteSpace(projectName))
+                throw new BridgeException("NestedProject of PLC root '" + plcPath + "' has no usable name");
+
+            string projectPath = null;
+            try { projectPath = nestedItem.PathName; }
+            catch { projectPath = null; }
+            if (string.IsNullOrWhiteSpace(projectPath))
+                projectPath = plcPath + "^" + projectName;
+
+            return new PlcProjectIdentity
+            {
+                PlcPath = plcPath,
+                PlcName = plcName,
+                ProjectPath = projectPath,
+                ProjectName = projectName,
+                PlcRoot = (object)root,
+                NestedProject = nested
+            };
+        }
+
         public static bool GetAutostart(object plcProject)
         {
             return ((ITcPlcProject)plcProject).BootProjectAutostart;
@@ -36,56 +110,26 @@ namespace Te1000Daemon
         }
 
         // CheckAllObjects (build-validate) lives on ITcPlcIECProject2 on the
-        // nested IEC project node (ITcProjectRoot.NestedProject of the PLC root).
+        // nested project INSTANCE node.
         public static bool CheckAll(object iecProject)
         {
             return ((ITcPlcIECProject2)iecProject).CheckAllObjects();
         }
 
-        // The nested IEC project of a PLC root, resolved through the
-        // Automation Interface rather than by display name.
-        //
-        // The nested project's tree name is localized by the XAE shell
-        // ("<name> Project" on English installs, "<name> Projekt" on German
-        // ones, ...) and follows the user-chosen project name, so callers must
-        // never construct it from the PLC root name + " Project" (issue #11).
-        // ITcProjectRoot.NestedProject is language-independent and hands back
-        // the exact object; ITcSmTreeItem.PathName is its exact tree path.
-        public sealed class NestedProject
-        {
-            public object Item;   // the ITcSmTreeItem / ITcPlcIECProject(2) object
-            public string Name;   // e.g. "Example Projekt"
-            public string Path;   // e.g. "TIPC^Example^Example Projekt"
-        }
-
-        // Returns null when the root does not expose ITcProjectRoot, has no
-        // nested project, or the read fails — callers fall back to probing.
-        public static NestedProject ResolveNestedProject(object projectRoot)
+        // ITcProjectRoot.NestedProject is the documented identity read on the PLC root.
+        public static string GetNestedProjectName(object projectRoot)
         {
             try
             {
                 ITcProjectRoot typed = (ITcProjectRoot)projectRoot;
                 object nested = typed.NestedProject;
                 if (nested == null) { return null; }
-                ITcSmTreeItem item = (ITcSmTreeItem)nested;
-                NestedProject r = new NestedProject();
-                r.Item = nested;
-                r.Name = item.Name;
-                try { r.Path = item.PathName; } catch { r.Path = null; }
-                return r;
+                return ((ITcSmTreeItem)nested).Name;
             }
             catch { return null; }
         }
 
-        // ITcProjectRoot.NestedProject is the documented identity read on the PLC root.
-        public static string GetNestedProjectName(object projectRoot)
-        {
-            NestedProject nested = ResolveNestedProject(projectRoot);
-            return nested == null ? null : nested.Name;
-        }
-
-        // First child of the PLC root is the project instance node ('<name> Instance').
-        // The nested IEC project is NOT enumerated as a child; use ResolveNestedProject.
+        // First ordinary child of the PLC root is the runtime project instance.
         public static string GetInstanceName(object treeItem)
         {
             try

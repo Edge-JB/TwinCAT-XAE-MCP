@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.4.1] — 2026-09-17
+## [2.4.1] — 2026-09-24
 
 ### Fixed
 - **`plc_pou check_objects` failed on non-English XAE shells** (#11). The nested
@@ -13,26 +13,43 @@ All notable changes to this project are documented here. The format is based on
   `<name> Projekt`, so `CheckAllObjects` never found an `ITcPlcIECProject2`
   implementer and failed with `E_NOINTERFACE`. The nested project does **not**
   appear in the PLC root's ordinary child enumeration (only the `<name> Instance`
-  node does), so the child-probe fallback could not rescue it either. The daemon
-  now resolves the nested project through the Automation Interface —
-  `ITcProjectRoot.NestedProject` on the PLC root, with `ITcSmTreeItem.PathName`
-  for its exact tree path — which is independent of the shell language, the
-  ` Project` suffix and the user-chosen project name. A new central resolver
-  (`PlcProjectHelper.ResolveNestedProject` / `ComHelpers.ResolveNestedProject`)
-  backs every code path that previously guessed the name:
-  `plc_pou check_objects`, the post-edit `validate:true` check, PLC project-node
-  resolution for `plc_pou tree` / `find` / `search`, `tc_task get_linked_task` /
-  `set_linked_task` candidate discovery, and the Solution Explorer selection used
-  by `session` PLC login/download/logout. The legacy by-name probing remains as a
-  fallback only when the root does not expose `ITcProjectRoot`. Verified live
-  (TcXaeShell.DTE.17.0, English): `check_objects`, `tree`, `get_linked_task` all
-  resolve `TIPC^<name>^<name> Project` via the API path.
+  node does), so the child-probe fallback could not rescue it either.
+
+  A single resolver, `PlcProjectHelper.Resolve`, now returns the PLC root and its
+  nested IEC project through the Automation Interface: `ITcProjectRoot.NestedProject`
+  for the exact object and `ITcSmTreeItem.PathName` for its exact tree path, falling
+  back to `<root path>^<actual nested name>`. It is independent of the shell
+  language, the ` Project` suffix and the user-chosen project name. It backs every
+  code path that previously guessed the name: `plc_pou check_objects`, the post-edit
+  `validate: true` check, project-node resolution for `plc_pou tree` / `find` /
+  `search`, `tc_task get_linked_task` / `set_linked_task` candidate discovery, and
+  the Solution Explorer selection used by `session` PLC login/download/logout.
+  No English-suffix guessing remains in the daemon; a PLC root that does not expose
+  a nested project now fails with a direct error naming the root instead of a
+  guessed path. Resolver design and code contributed by @doerk77 from their
+  German-shell (TcXaeShell 17 / TC 3.1.4026) fix.
 - **`plc_pou tree` / `find` labelled the project node by its English name.** The
   type classifier returned `Project` only when the node name ended in ` Project`
   and otherwise mapped item type 600 (`TREEITEMTYPE_PLCAPP`) to the undocumented
   label `App`, so a German shell reported `App` and `typeFilter: "Project"` did
   not match. The project node is now classified by item type alone; English
   output is unchanged.
+
+### Added
+- `plc_pou check_objects` returns `projectPath` (the resolved nested IEC project);
+  `instancePath` is kept with the same value for compatibility.
+- Post-edit `validate: true` reports `validationProjectPath` on success and
+  `validationError` on failure, instead of a bare `validated: false`.
+- `npm test` runs `tests/project-resolution.test.js`, a source-level regression
+  check that every resolver call site uses `PlcProjectHelper.Resolve` and that no
+  daemon source infers the project from an English ` Project` suffix. CI runs it.
+
+### Changed
+- `plcPath` for `plc_pou check_objects` / `tree` / `find` / `search` must name the
+  PLC root (`TIPC^<name>`), as documented. Passing the nested project path itself
+  previously worked by accident through the probe fallback and now errors.
+- `tc_task` task-reference discovery probes only the nested IEC project, no longer
+  the PLC root's other children.
 
 ## [2.4.0] — 2026-08-12
 

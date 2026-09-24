@@ -77,20 +77,6 @@ namespace Te1000Daemon
             catch { return null; }
         }
 
-        // Nested IEC project of the PLC root at plcPath (issue #11). Resolved via
-        // ITcProjectRoot.NestedProject so it is independent of the XAE display
-        // language and of the "<root> Project" naming convention. Path falls
-        // back to plcPath^Name when PathName is unavailable. Null when the root
-        // does not expose a nested project (caller should probe by path then).
-        public static PlcProjectHelper.NestedProject ResolveNestedProject(string plcPath, dynamic plcRoot)
-        {
-            PlcProjectHelper.NestedProject nested = PlcProjectHelper.ResolveNestedProject((object)plcRoot);
-            if (nested == null) return null;
-            if (string.IsNullOrWhiteSpace(nested.Path) && !string.IsNullOrWhiteSpace(nested.Name))
-                nested.Path = plcPath + "^" + nested.Name;
-            return nested;
-        }
-
         public static int ChildCount(dynamic treeItem)
         {
             try { return (int)treeItem.ChildCount; } catch { return 0; }
