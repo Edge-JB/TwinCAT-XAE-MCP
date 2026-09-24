@@ -907,62 +907,22 @@ namespace Te1000Daemon
         private static Json.JObj CheckObjects(ActionContext ctx)
         {
             dynamic sm = ctx.SysManager();
-            string plcPath = ctx.Payload.Str("plcPath");
-            if (string.IsNullOrWhiteSpace(plcPath))
+            PlcProjectIdentity project = PlcProjectHelper.Resolve(sm, ctx.Payload.Str("plcPath"));
+            bool valid;
+            try
             {
-                dynamic tipc = sm.LookupTreeItem("TIPC");
-                if (ComHelpers.ChildCount(tipc) < 1) throw new BridgeException("No PLC project found under TIPC");
-                plcPath = "TIPC^" + ((string)tipc.Child(1).Name);
+                valid = PlcProjectHelper.CheckAll(project.NestedProject);
             }
-            dynamic root = ComHelpers.GetTreeItem(sm, plcPath);
-            string rootName = ComHelpers.SafeStr(MakeNameGetter(root));
-
-            var candidatePaths = new List<string>();
-            if (!string.IsNullOrWhiteSpace(rootName)) candidatePaths.Add(plcPath + "^" + rootName + " Project");
-            int childCount = ComHelpers.ChildCount(root);
-            for (int ci = 1; ci <= childCount; ci++)
+            catch (Exception ex)
             {
-                dynamic childNode = ComHelpers.Child(root, ci);
-                if (childNode != null)
-                {
-                    string cn = ComHelpers.SafeStr(MakeNameGetter(childNode));
-                    if (!string.IsNullOrWhiteSpace(cn))
-                    {
-                        string cp = plcPath + "^" + cn;
-                        if (!candidatePaths.Contains(cp)) candidatePaths.Add(cp);
-                    }
-                }
-            }
-            if (!candidatePaths.Contains(plcPath)) candidatePaths.Add(plcPath);
-
-            bool valid = false;
-            string instancePath = plcPath;
-            string lastErr = null;
-            bool resolved = false;
-            foreach (string candPath in candidatePaths)
-            {
-                try
-                {
-                    dynamic node = ComHelpers.GetTreeItem(sm, candPath);
-                    valid = PlcProjectHelper.CheckAll((object)node);
-                    instancePath = candPath;
-                    resolved = true;
-                    break;
-                }
-                catch (Exception ex)
-                {
-                    lastErr = ex.Message;
-                }
-            }
-            if (!resolved)
-            {
-                throw new BridgeException("could not find a node implementing ITcPlcIECProject2 (CheckAllObjects) under '" +
-                    plcPath + "'. Tried the '<name> Project' instance node and the PLC root's children. Last error: " + lastErr);
+                throw new BridgeException("Nested IEC project '" + project.ProjectPath +
+                    "' does not implement ITcPlcIECProject2 (CheckAllObjects): " + ex.Message);
             }
 
             var data = new Json.JObj();
-            data["plcPath"] = plcPath;
-            data["instancePath"] = instancePath;
+            data["plcPath"] = project.PlcPath;
+            data["projectPath"] = project.ProjectPath;
+            data["instancePath"] = project.ProjectPath;
             data["allObjectsValid"] = valid;
             return data;
         }
@@ -972,7 +932,7 @@ namespace Te1000Daemon
         private static Json.JObj Tree(ActionContext ctx)
         {
             dynamic sm = ctx.SysManager();
-            ProjectNode resolved = GetPlcProjectNodePath(sm, ctx.Payload.Str("plcPath"));
+            PlcProjectIdentity resolved = GetPlcProjectNodePath(sm, ctx.Payload.Str("plcPath"));
             string plcPath = resolved.PlcPath;
             string projectPath = resolved.ProjectPath;
 
@@ -1022,7 +982,7 @@ namespace Te1000Daemon
                 throw new BridgeException("find requires at least one of name / typeFilter");
 
             dynamic sm = ctx.SysManager();
-            ProjectNode resolved = GetPlcProjectNodePath(sm, ctx.Payload.Str("plcPath"));
+            PlcProjectIdentity resolved = GetPlcProjectNodePath(sm, ctx.Payload.Str("plcPath"));
             string plcPath = resolved.PlcPath;
             string projectPath = resolved.ProjectPath;
 
@@ -1064,7 +1024,7 @@ namespace Te1000Daemon
             }
 
             dynamic sm = ctx.SysManager();
-            ProjectNode resolved = GetPlcProjectNodePath(sm, ctx.Payload.Str("plcPath"));
+            PlcProjectIdentity resolved = GetPlcProjectNodePath(sm, ctx.Payload.Str("plcPath"));
             string plcPath = resolved.PlcPath;
             string projectPath = resolved.ProjectPath;
 
@@ -1969,14 +1929,13 @@ namespace Te1000Daemon
             int it = itemType == null ? -1 : ComHelpers.ToInt(itemType);
             int st = itemSubType == null ? -1 : ComHelpers.ToInt(itemSubType);
 
-            if (Regex.IsMatch(nm, "\\sProject$")) return "Project";
             string[] folderNames = new string[] { "References", "POUs", "DUTs", "GVLs", "VISUs", "FBs", "PRGs" };
             if (Array.IndexOf(folderNames, nm) >= 0 && childCount > 0 && !hasDecl) return "Folder";
 
             switch (it)
             {
                 case 9: return "Project";
-                case 600: return "App";
+                case 600: return "Project";
                 case 621: return "Task";
                 case 8: return "Folder";
                 default: break;
@@ -2011,69 +1970,9 @@ namespace Te1000Daemon
         // Tree walk (PERF) + project-node resolution
         // ====================================================================
 
-        // Resolve-PlcRootPath (L1164-1177)
-        private static string ResolvePlcRootPath(dynamic sm, string path)
+        private static PlcProjectIdentity GetPlcProjectNodePath(dynamic sm, string plcPath)
         {
-            if (!string.IsNullOrWhiteSpace(path)) return path;
-            dynamic tipc = ComHelpers.GetTreeItem(sm, "TIPC");
-            if (ComHelpers.ChildCount(tipc) < 1) throw new BridgeException("No PLC project found under TIPC");
-            dynamic first = ComHelpers.Child(tipc, 1);
-            string firstName = ComHelpers.SafeStr(MakeNameGetter(first));
-            return "TIPC^" + firstName;
-        }
-
-        private sealed class ProjectNode { public string PlcPath; public string ProjectPath; }
-
-        // Get-PlcProjectNodePath (L2258-2310)
-        private static ProjectNode GetPlcProjectNodePath(dynamic sm, string plcPathIn)
-        {
-            string plcPath = ResolvePlcRootPath(sm, plcPathIn);
-            PathUtil.AssertNotSafetyPath(plcPath);
-            dynamic root = ComHelpers.GetTreeItem(sm, plcPath);
-            string rootName = ComHelpers.SafeStr(MakeNameGetter(root));
-
-            var candidatePaths = new List<string>();
-            if (!string.IsNullOrWhiteSpace(rootName)) candidatePaths.Add(plcPath + "^" + rootName + " Project");
-            int childCount = ComHelpers.ChildCount(root);
-            for (int ci = 1; ci <= childCount; ci++)
-            {
-                dynamic childNode = ComHelpers.Child(root, ci);
-                if (childNode != null)
-                {
-                    string cn = ComHelpers.SafeStr(MakeNameGetter(childNode));
-                    if (!string.IsNullOrWhiteSpace(cn))
-                    {
-                        string cp = plcPath + "^" + cn;
-                        if (!candidatePaths.Contains(cp)) candidatePaths.Add(cp);
-                    }
-                }
-            }
-            if (!candidatePaths.Contains(plcPath)) candidatePaths.Add(plcPath);
-
-            string lastErr = null;
-            string firstResolvable = null;
-            for (int idx = 0; idx < candidatePaths.Count; idx++)
-            {
-                string candPath = candidatePaths[idx];
-                try
-                {
-                    dynamic node = ComHelpers.GetTreeItem(sm, candPath);
-                    string nn = ComHelpers.SafeStr(MakeNameGetter(node));
-                    bool isLast = (idx == candidatePaths.Count - 1);
-                    if ((nn != null && Regex.IsMatch(nn, "\\sProject$")) || isLast)
-                    {
-                        var pn = new ProjectNode(); pn.PlcPath = plcPath; pn.ProjectPath = candPath; return pn;
-                    }
-                    // PS overwrites on every no-error iteration (last resolvable wins).
-                    if (lastErr == null) firstResolvable = candPath;
-                }
-                catch (Exception ex) { lastErr = ex.Message; }
-            }
-            if (firstResolvable != null)
-            {
-                var pn = new ProjectNode(); pn.PlcPath = plcPath; pn.ProjectPath = firstResolvable; return pn;
-            }
-            throw new BridgeException("could not resolve the IEC project node under '" + plcPath + "'. Last error: " + lastErr);
+            return PlcProjectHelper.Resolve(sm, plcPath);
         }
 
         // PERF: resolve the subtree root via cache + memoize the bounded walk.
@@ -2347,7 +2246,7 @@ namespace Te1000Daemon
             dynamic sm;
             try { sm = ctx.SysManager(); } catch { return; }
 
-            ProjectNode resolved;
+            PlcProjectIdentity resolved;
             try { resolved = GetPlcProjectNodePath(sm, null); }
             catch { return; }
             string startPath = resolved.ProjectPath;
@@ -2443,41 +2342,15 @@ namespace Te1000Daemon
             if (!(ctx.Payload.Has("validate") && ctx.Payload.Bool("validate"))) return;
             try
             {
-                dynamic tipc = sm.LookupTreeItem("TIPC");
-                if (ComHelpers.ChildCount(tipc) < 1) { data["validated"] = false; return; }
-                string plcPath = "TIPC^" + ((string)tipc.Child(1).Name);
-                dynamic root = ComHelpers.GetTreeItem(sm, plcPath);
-                string rootName = ComHelpers.SafeStr(MakeNameGetter(root));
-                var candidatePaths = new List<string>();
-                if (!string.IsNullOrWhiteSpace(rootName)) candidatePaths.Add(plcPath + "^" + rootName + " Project");
-                int childCount = ComHelpers.ChildCount(root);
-                for (int ci = 1; ci <= childCount; ci++)
-                {
-                    dynamic childNode = ComHelpers.Child(root, ci);
-                    if (childNode != null)
-                    {
-                        string cn = ComHelpers.SafeStr(MakeNameGetter(childNode));
-                        if (!string.IsNullOrWhiteSpace(cn))
-                        {
-                            string cp = plcPath + "^" + cn;
-                            if (!candidatePaths.Contains(cp)) candidatePaths.Add(cp);
-                        }
-                    }
-                }
-                if (!candidatePaths.Contains(plcPath)) candidatePaths.Add(plcPath);
-                foreach (string candPath in candidatePaths)
-                {
-                    try
-                    {
-                        dynamic node = ComHelpers.GetTreeItem(sm, candPath);
-                        data["validated"] = PlcProjectHelper.CheckAll((object)node);
-                        return;
-                    }
-                    catch { }
-                }
-                data["validated"] = false;
+                PlcProjectIdentity project = PlcProjectHelper.Resolve(sm, null);
+                data["validated"] = PlcProjectHelper.CheckAll(project.NestedProject);
+                data["validationProjectPath"] = project.ProjectPath;
             }
-            catch { data["validated"] = false; }
+            catch (Exception ex)
+            {
+                data["validated"] = false;
+                data["validationError"] = ex.Message;
+            }
         }
 
         // ====================================================================

@@ -1,11 +1,12 @@
 {
   "name": "te1000-mcp",
-  "version": "2.4.0",
+  "version": "2.4.1",
   "description": "MCP server for Beckhoff TwinCAT TE1000 / XAE Shell automation",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "check": "node --check index.js"
+    "check": "node --check index.js",
+    "test": "node tests/project-resolution.test.js"
   },
   "keywords": [
     "mcp",

@@ -3,6 +3,16 @@ using TCatSysManagerLib;
 
 namespace Te1000Daemon
 {
+    public sealed class PlcProjectIdentity
+    {
+        public string PlcPath;
+        public string PlcName;
+        public string ProjectPath;
+        public string ProjectName;
+        public object PlcRoot;
+        public object NestedProject;
+    }
+
     // Verbatim port of the bridge's compiled Te1000PlcProjectHelper (L782-851).
     //
     // ITcPlcProject / ITcPlcIECProject(2) / ITcProjectRoot / ITcSmTreeItem /
@@ -14,6 +24,70 @@ namespace Te1000Daemon
     // view (it is, on this machine — same precondition as the PS helper).
     public static class PlcProjectHelper
     {
+        public static PlcProjectIdentity Resolve(dynamic systemManager, string plcPath)
+        {
+            if (string.IsNullOrWhiteSpace(plcPath))
+            {
+                dynamic tipc = ComHelpers.GetTreeItem(systemManager, "TIPC");
+                if (ComHelpers.ChildCount(tipc) < 1)
+                    throw new BridgeException("No PLC project found under TIPC");
+                dynamic first = ComHelpers.Child(tipc, 1);
+                string firstName = ComHelpers.SafeStr(delegate { return first.Name; });
+                if (string.IsNullOrWhiteSpace(firstName))
+                    throw new BridgeException("The first PLC project under TIPC has no usable name");
+                plcPath = "TIPC^" + firstName;
+            }
+
+            PathUtil.AssertNotSafetyPath(plcPath);
+            dynamic root = ComHelpers.GetTreeItem(systemManager, plcPath);
+            string plcName = ComHelpers.SafeStr(delegate { return root.Name; });
+            if (string.IsNullOrWhiteSpace(plcName))
+                throw new BridgeException("PLC root '" + plcPath + "' has no usable name");
+            object nested;
+            try
+            {
+                nested = ((ITcProjectRoot)(object)root).NestedProject;
+            }
+            catch (Exception ex)
+            {
+                throw new BridgeException("PLC root '" + plcPath +
+                    "' does not implement ITcProjectRoot or expose NestedProject: " + ex.Message);
+            }
+            if (nested == null)
+                throw new BridgeException("PLC root '" + plcPath + "' exposes no nested IEC project");
+
+            ITcSmTreeItem nestedItem;
+            try
+            {
+                nestedItem = (ITcSmTreeItem)nested;
+            }
+            catch (Exception ex)
+            {
+                throw new BridgeException("NestedProject of PLC root '" + plcPath +
+                    "' does not implement ITcSmTreeItem: " + ex.Message);
+            }
+
+            string projectName = nestedItem.Name;
+            if (string.IsNullOrWhiteSpace(projectName))
+                throw new BridgeException("NestedProject of PLC root '" + plcPath + "' has no usable name");
+
+            string projectPath = null;
+            try { projectPath = nestedItem.PathName; }
+            catch { projectPath = null; }
+            if (string.IsNullOrWhiteSpace(projectPath))
+                projectPath = plcPath + "^" + projectName;
+
+            return new PlcProjectIdentity
+            {
+                PlcPath = plcPath,
+                PlcName = plcName,
+                ProjectPath = projectPath,
+                ProjectName = projectName,
+                PlcRoot = (object)root,
+                NestedProject = nested
+            };
+        }
+
         public static bool GetAutostart(object plcProject)
         {
             return ((ITcPlcProject)plcProject).BootProjectAutostart;
@@ -55,7 +129,7 @@ namespace Te1000Daemon
             catch { return null; }
         }
 
-        // First child of the PLC root is the project instance node ('<name> Project').
+        // First ordinary child of the PLC root is the runtime project instance.
         public static string GetInstanceName(object treeItem)
         {
             try
