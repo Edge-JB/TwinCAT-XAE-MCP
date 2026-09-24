@@ -27,6 +27,12 @@ All notable changes to this project are documented here. The format is based on
   fallback only when the root does not expose `ITcProjectRoot`. Verified live
   (TcXaeShell.DTE.17.0, English): `check_objects`, `tree`, `get_linked_task` all
   resolve `TIPC^<name>^<name> Project` via the API path.
+- **`plc_pou tree` / `find` labelled the project node by its English name.** The
+  type classifier returned `Project` only when the node name ended in ` Project`
+  and otherwise mapped item type 600 (`TREEITEMTYPE_PLCAPP`) to the undocumented
+  label `App`, so a German shell reported `App` and `typeFilter: "Project"` did
+  not match. The project node is now classified by item type alone; English
+  output is unchanged.
 
 ## [2.4.0] — 2026-08-12
 

@@ -1996,14 +1996,17 @@ namespace Te1000Daemon
             int it = itemType == null ? -1 : ComHelpers.ToInt(itemType);
             int st = itemSubType == null ? -1 : ComHelpers.ToInt(itemSubType);
 
-            if (Regex.IsMatch(nm, "\\sProject$")) return "Project";
             string[] folderNames = new string[] { "References", "POUs", "DUTs", "GVLs", "VISUs", "FBs", "PRGs" };
             if (Array.IndexOf(folderNames, nm) >= 0 && childCount > 0 && !hasDecl) return "Folder";
 
+            // Classify the project node by item type, not by its display name: the
+            // nested IEC project is TREEITEMTYPE_PLCAPP (600) and its name is
+            // localized ("<name> Project" / "<name> Projekt" / ...), so a name
+            // suffix check yields language-dependent labels (issue #11 review).
             switch (it)
             {
-                case 9: return "Project";
-                case 600: return "App";
+                case 9: return "Project";   // TREEITEMTYPE_IECPRJ
+                case 600: return "Project"; // TREEITEMTYPE_PLCAPP (nested IEC project)
                 case 621: return "Task";
                 case 8: return "Folder";
                 default: break;
