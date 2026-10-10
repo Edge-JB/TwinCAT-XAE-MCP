@@ -221,7 +221,8 @@ paths refuse `TISC` (safety) paths.
 - **Discover** — `tree` (recursive read-only walk, `typeFilter`/`depth`), `find` (resolve a `^`-path),
   `search` (project-wide grep over decl + ST impl).
 - **Lifecycle** — `rename` (in place), `move` (reparent via export-import-delete), `delete` 🔒
-  (`dryRun: true` to preview or `confirm: "ALLOW_TWINCAT_DELETE"`), `check_objects` (CheckAllObjects).
+  (`dryRun: true` to preview or `confirm: "ALLOW_TWINCAT_DELETE"`), `check_objects` (CheckAllObjects on the
+  nested IEC project, resolved via `ITcProjectRoot.NestedProject` so it works on localized XAE shells).
 
 ### `plc_library`
 Library refs / placeholders / repos via `ITcPlcLibraryManager`: `list`, `scan`, `repos`,

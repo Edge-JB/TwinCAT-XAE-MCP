@@ -64,7 +64,7 @@ node daemon\test-ping.js                                    # no-XAE: process + 
 - For pure-Node work (front, schemas, client) you don't need to rebuild the daemon, but a built
   `Te1000Daemon.exe` must be present for the front to serve calls end to end.
 
-CI runs `npm run check` on every push and pull request. There is no automated test of the live
+CI runs `npm run check` and `npm test` on every push and pull request. There is no automated test of the live
 TwinCAT path — that requires a real XAE installation and is exercised manually against a project.
 `node daemon/test-ping.js` validates the daemon end to end **without** XAE.
 

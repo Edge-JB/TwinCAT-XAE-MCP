@@ -536,22 +536,11 @@ namespace Te1000Daemon
             return item;
         }
 
-        // Resolve-PlcRootPath (L1164-1177).
-        private static string ResolvePlcRootPath(dynamic sm, string path)
-        {
-            if (!string.IsNullOrWhiteSpace(path)) return path;
-            dynamic tipc = ComHelpers.GetTreeItem(sm, "TIPC");
-            if (ComHelpers.ChildCount(tipc) < 1) throw new BridgeException("No PLC project found under TIPC");
-            dynamic first = ComHelpers.Child(tipc, 1);
-            string firstName = ComHelpers.SafeStr(delegate { return first.Name; });
-            return "TIPC^" + firstName;
-        }
-
         // Resolve-PlcTaskRefCandidates (L1186-1259): ordered list of candidate tree
         // PATHS that might implement ITcPlcTaskReference. When a path is supplied it
-        // is the single candidate. Otherwise probe the '<name> Project' node and the
-        // PLC root's children, preferring a 'PlcTask'-named child, plus the
-        // well-known names PlcTask/VISU_TASK, then fall back to the project/root nodes.
+        // is the single candidate. Otherwise start at the authoritative nested IEC
+        // project, prefer a 'PlcTask'-named child and the well-known names
+        // PlcTask/VISU_TASK, then fall back to the project/root nodes.
         private static List<string> ResolvePlcTaskRefCandidates(ActionContext ctx, dynamic sm, string path)
         {
             if (!string.IsNullOrWhiteSpace(path))
@@ -561,28 +550,14 @@ namespace Te1000Daemon
                 return single;
             }
 
-            string plcPath = ResolvePlcRootPath(sm, null);
-            dynamic root = ComHelpers.GetTreeItem(sm, plcPath);
-            string rootName = ComHelpers.SafeStr(delegate { return root.Name; });
+            PlcProjectIdentity project = PlcProjectHelper.Resolve(sm, null);
+            string plcPath = project.PlcPath;
 
             var candidatePaths = new List<string>();
 
-            // Build the list of project-node paths to probe.
+            // Task references are children of the authoritative nested IEC project.
             var projectPaths = new List<string>();
-            if (!string.IsNullOrWhiteSpace(rootName))
-            {
-                projectPaths.Add(plcPath + "^" + rootName + " Project");
-            }
-            int rootChildCount = ComHelpers.ChildCount(root);
-            for (int ri = 1; ri <= rootChildCount; ri++)
-            {
-                dynamic rc = ComHelpers.Child(root, ri);
-                if (rc == null) continue;
-                string rcn = ComHelpers.SafeStr(delegate { return rc.Name; });
-                if (string.IsNullOrWhiteSpace(rcn)) continue;
-                string rcp = plcPath + "^" + rcn;
-                if (!projectPaths.Contains(rcp)) projectPaths.Add(rcp);
-            }
+            projectPaths.Add(project.ProjectPath);
 
             foreach (string projPath in projectPaths)
             {

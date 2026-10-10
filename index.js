@@ -178,7 +178,7 @@ const server = {
 
 function buildServer() {
   const mcp = new McpServer(
-    { name: "te1000-mcp", version: "2.4.0" },
+    { name: "te1000-mcp", version: "2.4.1" },
     {
       // 2026-07-28 cache hints: the tool surface is fixed for the life of the
       // process, so stateless clients may cache tools/list and server/discover
