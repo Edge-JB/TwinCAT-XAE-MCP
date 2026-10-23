@@ -17,7 +17,8 @@ if (-not (Test-Path -LiteralPath $msbuild)) {
 $tcatCandidates = @(
     'C:\Program Files (x86)\Beckhoff\TwinCAT\Functions\TE2000-HMI-Engineering\VisualStudio\2022\TCatSysManagerLib.dll',
     'C:\Program Files (x86)\Beckhoff\TwinCAT\Functions\TE2000-HMI-Engineering\VisualStudio\2026\TCatSysManagerLib.dll',
-    'C:\Program Files (x86)\Beckhoff\TwinCAT\Functions\TE2000-HMI-Engineering\VisualStudio\TcXaeShell\TCatSysManagerLib.dll'
+    'C:\Program Files (x86)\Beckhoff\TwinCAT\Functions\TE2000-HMI-Engineering\VisualStudio\TcXaeShell\TCatSysManagerLib.dll',
+    'C:\Program Files (x86)\Beckhoff\TwinCAT\Functions\TF3500-Analytics-Logger\SystemManagerExtension\TCatSysManagerLib.dll'
 )
 $found = $tcatCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 if (-not $found) {

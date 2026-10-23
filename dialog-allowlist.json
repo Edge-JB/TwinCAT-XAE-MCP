@@ -10,5 +10,7 @@
     { "match": "File Modification Detected", "button": "Yes" },
     { "match": "Microsoft Visual Studio", "textMatch": "has been modified outside", "button": "Yes" }
   ],
-  "rules": []
+  "rules": [
+    { "match": "^TcXaeShell$", "textMatch": "Device\\ 'E/IP\\ Master\\ -\\ C01\\.R01\\.N10\\ \\(ECAT\\ EIP\\ Scanner\\ \\(EL6652\\)\\)'\\ needs\\ sync\\ master\\ \\(at\\ least\\ one\\ variable\\ linked\\ to\\ a\\ task\\ variable\\)", "button": "OK" }
+  ]
 }

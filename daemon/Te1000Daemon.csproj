@@ -73,7 +73,7 @@
       HintPath if TwinCAT lives elsewhere.
     -->
     <Reference Include="TCatSysManagerLib">
-      <HintPath>C:\Program Files (x86)\Beckhoff\TwinCAT\Functions\TE2000-HMI-Engineering\VisualStudio\2022\TCatSysManagerLib.dll</HintPath>
+      <HintPath>C:\Program Files (x86)\Beckhoff\TwinCAT\Functions\TF3500-Analytics-Logger\SystemManagerExtension\TCatSysManagerLib.dll</HintPath>
       <EmbedInteropTypes>true</EmbedInteropTypes>
       <Private>false</Private>
     </Reference>
